@@ -1,0 +1,16 @@
+{
+  "negative": [
+    "bad", "poor", "terrible", "awful", "horrible", "worst", "not satisfied", 
+    "not professional","complaint", "complain", "useless", "rubbish", "unfriendly",
+    "rude", "disappointed", "frustrated", "angry", "annoying", "absurd",
+    "ridiculous", "loop", "waste", "garbage", "crap", "no help at all", 
+    "waste my time", "stupid", "not good", "not friendly", "not helpful"
+  ],
+  "positive": [
+    "great", "excellent", "amazing", "satisfied", "helpful", "friendly",
+    "fast", "quick", "easy", "appreciate", "perfect", "wonderful", "awesome", "nice",
+    "pleased", "best", "fantastic", "superb", "outstanding", "brilliant",
+    "terrific", "exceptional", "recommend", "recommended", "professional", "fully resolved", 
+    "very helpful", "nice experience", "all good", "very good", "very helpful"
+  ]
+}
