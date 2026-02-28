@@ -107,7 +107,10 @@ def perform_z_test(n1, x1, n2, x2, alpha=0.05):
 
 
 def perform_chi_square_test(metadata_with_clusters, clusters_df, group_col):
-    """Chi-square test: clusters x groups association."""
+    """Chi-square test: clusters x groups association.
+
+    Returns standardized residuals for interpretation (useful for 3+ groups).
+    """
     print("\nPerforming chi-square test for overall association...")
     contingency = pd.crosstab(
         metadata_with_clusters['Cluster'],
@@ -121,7 +124,12 @@ def perform_chi_square_test(metadata_with_clusters, clusters_df, group_col):
         print(f"✓ Result: Groups have significantly different cluster distributions (p < 0.05)")
     else:
         print("✗ Result: No significant difference in cluster distributions (p >= 0.05)")
-    return chi2, p_value, dof
+    # Standardized residuals: (observed - expected) / sqrt(expected)
+    expected_df = pd.DataFrame(expected, index=contingency.index, columns=contingency.columns)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        residuals_df = (contingency - expected_df) / np.sqrt(expected_df)
+    residuals_df = residuals_df.replace([np.inf, -np.inf], np.nan)
+    return chi2, p_value, dof, residuals_df
 
 
 def add_statistical_tests(comparison_df, totals, categories):
@@ -152,7 +160,7 @@ def add_statistical_tests(comparison_df, totals, categories):
     return comparison_df
 
 
-def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col):
+def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, residuals_df=None):
     """Generate text report; handles 2 or more groups."""
     report_lines = []
     report_lines.append("="*60)
@@ -165,6 +173,8 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col):
     report_lines.append(f"  Chi-square statistic: {chi2:.4f}")
     report_lines.append(f"  P-value: {chi2_p:.6f}")
     report_lines.append(f"  Conclusion: {'Significant difference' if chi2_p < 0.05 else 'No significant difference'}")
+    if len(categories) >= 3:
+        report_lines.append("  Note: For 3+ groups, only the overall chi-square test is performed (no per-cluster z-tests).")
 
     report_lines.append(f"\n\nTOP CLUSTERS BY GROUP:")
     for cat in categories:
@@ -190,6 +200,27 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col):
                     f"(CI: {row['CI_Lower']:.2f}% to {row['CI_Upper']:.2f}%)")
         else:
             report_lines.append("  No significant differences found")
+    elif len(categories) >= 3 and residuals_df is not None and isinstance(residuals_df, pd.DataFrame):
+        # Help interpret where differences come from (cells contributing most)
+        report_lines.append(f"\n\nCELLS WITH LARGEST STANDARDIZED RESIDUALS (interpretation aid):")
+        # Map cluster id -> label for readability
+        id_to_label = dict(zip(comparison_df['Cluster_ID'], comparison_df['Cluster_Label']))
+        try:
+            flat = residuals_df.stack(dropna=True, future_stack=True).reset_index()
+        except TypeError:
+            # Older pandas without future_stack
+            flat = residuals_df.stack(dropna=True).reset_index()
+        flat.columns = ['Cluster_ID', 'Group', 'Std_Residual']
+        flat['Abs'] = flat['Std_Residual'].abs()
+        top = flat.sort_values('Abs', ascending=False).head(10)
+        if len(top) == 0:
+            report_lines.append("  (No residuals available)")
+        else:
+            for _, r in top.iterrows():
+                cid = r['Cluster_ID']
+                label = id_to_label.get(cid, f"Cluster_ID {cid}")
+                direction = "over" if r['Std_Residual'] > 0 else "under"
+                report_lines.append(f"  {label} (ID {cid}) in {r['Group']}: {r['Std_Residual']:.2f} ({direction}-represented vs expected)")
 
     report_lines.append("\n" + "="*60)
     return "\n".join(report_lines)
@@ -268,7 +299,7 @@ if __name__ == '__main__':
         comparison_df, totals = calculate_proportions(
             metadata_with_clusters, clusters_df, group_col, categories
         )
-        chi2, chi2_p, dof = perform_chi_square_test(
+        chi2, chi2_p, dof, residuals_df = perform_chi_square_test(
             metadata_with_clusters, clusters_df, group_col
         )
         comparison_df = add_statistical_tests(comparison_df, totals, categories)
@@ -279,7 +310,7 @@ if __name__ == '__main__':
         comparison_df.to_csv(output_csv, index=False, encoding="utf-8-sig")
         print(f"\n✓ Saved comparison results to {output_csv}")
 
-        report = generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col)
+        report = generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, residuals_df=residuals_df)
         with open(output_report, 'w', encoding='utf-8') as f:
             f.write(report)
         print(f"✓ Saved comparison report to {output_report}")
