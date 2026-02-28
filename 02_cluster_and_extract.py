@@ -217,17 +217,20 @@ def load_data(embeddings_file, metadata_file, optimal_k_file, algorithm, manual_
     return embeddings, metadata, results['optimal_k']
 
 
-# Sentiment lexicon: loaded from config/sentiment_words.json (longer matches first)
+# Sentiment lexicon: config/config.json under key "sentiment_words" (longer matches first)
 def _load_sentiment_config():
-    config_path = Path(__file__).resolve().parent / "config" / "sentiment_words.json"
+    config_path = Path(__file__).resolve().parent / "config" / "config.json"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            raw = json.load(f)
+        data = raw.get("sentiment_words")
+        if not data or not isinstance(data, dict):
+            raise ValueError("config.json must contain a 'sentiment_words' object")
         neg = [s.strip() for s in data.get("negative", []) if s and isinstance(s, str)]
         pos = [s.strip() for s in data.get("positive", []) if s and isinstance(s, str)]
         return sorted(neg, key=len, reverse=True), sorted(pos, key=len, reverse=True)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Warning: Could not load {config_path}: {e}. Using minimal sentiment lists.")
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"Warning: Could not load sentiment from {config_path}: {e}. Using minimal lists.")
         return sorted(["bad"], key=len, reverse=True), sorted(["good"], key=len, reverse=True)
 
 

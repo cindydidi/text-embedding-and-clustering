@@ -1,0 +1,59 @@
+{
+  "sentiment_words": {
+    "negative": [
+      "bad", "poor", "terrible", "awful", "horrible", "worst", "not satisfied",
+      "not professional", "complaint", "complain", "useless", "rubbish",
+      "unfriendly", "rude", "disappointed", "frustrated", "angry", "annoying",
+      "absurd", "ridiculous", "loop", "waste", "garbage", "crap", "no help at all",
+      "waste my time", "stupid", "not good", "not friendly", "not helpful"
+    ],
+    "positive": [
+      "great", "excellent", "amazing", "satisfied", "helpful", "friendly",
+      "fast", "quick", "easy", "appreciate", "perfect", "wonderful", "awesome",
+      "nice", "pleased", "best", "fantastic", "superb", "outstanding", "brilliant",
+      "terrific", "exceptional", "recommend", "recommended", "professional",
+      "fully resolved", "very helpful", "nice experience", "all good", "very good"
+    ]
+  },
+  "visualization": {
+    "output_files": {
+      "comparison_csv": "cluster_comparison.csv",
+      "comparison_report": "cluster_comparison_report.txt",
+      "overview_report": "overview_report.txt",
+      "cluster_sizes": "cluster_sizes.png",
+      "cluster_proportions_pie": "cluster_proportions_pie.png",
+      "cluster_heatmap": "cluster_heatmap.png",
+      "cluster_mix_stacked_bar": "cluster_mix_stacked_bar.png",
+      "cluster_comparison_chart": "cluster_comparison_chart.png",
+      "cluster_differences_chart": "cluster_differences_chart.png",
+      "cluster_facets": "cluster_distribution_facets.png",
+      "cluster_treemap": "cluster_treemap.html",
+      "cluster_sankey": "cluster_group_sankey.html",
+      "wordcloud_prefix": "wordcloud_"
+    },
+    "chart": {
+      "font_family": "DejaVu Sans",
+      "font_size_title": 14,
+      "font_size_axis": 12,
+      "font_size_tick": 9,
+      "font_size_legend": 11,
+      "dpi": 300,
+      "dpi_small": 150,
+      "bar_color": "#2E86AB",
+      "difference_positive_color": "#2E86AB",
+      "difference_negative_color": "#A23B72",
+      "heatmap_cmap": "YlOrRd",
+      "wordcloud_colormap": "viridis",
+      "wordcloud_background": "white"
+    },
+    "titles": {
+      "cluster_sizes": "Cluster sizes (top clusters by count)",
+      "cluster_proportions_pie": "Cluster proportions (top + Other)",
+      "cluster_distribution_by_group": "Cluster Distribution by Group",
+      "cluster_mix_stacked": "Cluster mix within each group (top clusters + Other)",
+      "significant_differences": "Significant Cluster Differences Between Groups",
+      "cluster_facets": "Cluster distribution by group (facets)",
+      "wordcloud": "Word Cloud"
+    }
+  }
+}

@@ -16,10 +16,12 @@ os.environ.setdefault("MPLCONFIGDIR", os.path.join(_RUNTIME_CACHE_DIR, "matplotl
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import argparse
+import json
 import re
 import sys
 import importlib
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -35,23 +37,31 @@ from wordcloud import WordCloud
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
-# Output names (comparison step)
-COMPARISON_CSV = 'cluster_comparison.csv'
-COMPARISON_REPORT = 'cluster_comparison_report.txt'
-# Input/output names for visualization
+# Input file names (fixed)
 METADATA_CSV = 'embeddings_metadata.csv'
 METADATA_WITH_CLUSTERS_CSV = 'metadata_with_clusters.csv'
 CLUSTERS_CSV = 'clusters_with_labels.csv'
-OVERVIEW_REPORT_TXT = 'overview_report.txt'
-CLUSTER_SIZES_PNG = 'cluster_sizes.png'
-CLUSTER_PROPORTIONS_PIE_PNG = 'cluster_proportions_pie.png'
-CLUSTER_HEATMAP_PNG = 'cluster_heatmap.png'
-CLUSTER_MIX_STACKED_BAR_PNG = 'cluster_mix_stacked_bar.png'
-CLUSTER_COMPARISON_CHART_PNG = 'cluster_comparison_chart.png'
-CLUSTER_DIFFERENCES_CHART_PNG = 'cluster_differences_chart.png'
-CLUSTER_FACETS_PNG = 'cluster_distribution_facets.png'
-CLUSTER_TREEMAP_HTML = 'cluster_treemap.html'
-CLUSTER_SANKEY_HTML = 'cluster_group_sankey.html'
+
+
+def _load_visualization_config():
+    """Load visualization from config/config.json. Single source of truth; no fallbacks."""
+    config_path = Path(__file__).resolve().parent / "config" / "config.json"
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    viz = raw["visualization"]
+    if not isinstance(viz, dict) or "output_files" not in viz:
+        raise ValueError(
+            "config/config.json must have a 'visualization' object with 'output_files'. "
+            f"Got: {type(viz).__name__}"
+        )
+    return viz
+
+
+_VIZ = _load_visualization_config()
+_of = _VIZ["output_files"]
+# Avoid matplotlib/pyparsing ParseException on hyphen in generic name (use equivalent)
+if _VIZ.get("chart") and _VIZ["chart"].get("font_family") == "sans-serif":
+    _VIZ["chart"] = {**_VIZ["chart"], "font_family": "DejaVu Sans"}
 
 # Column name for text content in metadata (must match step 01 output)
 TEXT_COLUMN = 'text'
@@ -156,6 +166,7 @@ def calculate_proportions(metadata_with_clusters, clusters_df, group_col, catego
         comparison_data.append(row)
 
     comparison_df = pd.DataFrame(comparison_data)
+    comparison_df = _ensure_comparison_numeric(comparison_df)
     return comparison_df, totals
 
 
@@ -305,9 +316,10 @@ def get_categories_from_comparison(comparison_df):
     return [c.replace('_Count', '') for c in count_cols]
 
 
-def get_group_col_from_report(report_path=COMPARISON_REPORT):
+def get_group_col_from_report(report_path=None):
     """Parse group-by column name from comparison report. Returns None if not found."""
-    if not os.path.isfile(report_path):
+    report_path = report_path or _of["comparison_report"]
+    if not os.path.isfile(report_path) or report_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.html')):
         return None
     try:
         with open(report_path, 'r', encoding='utf-8') as f:
@@ -318,9 +330,10 @@ def get_group_col_from_report(report_path=COMPARISON_REPORT):
         return None
 
 
-def parse_chi_square_from_report(report_path=COMPARISON_REPORT):
+def parse_chi_square_from_report(report_path=None):
     """Parse chi-square statistic and p-value from comparison report."""
-    if not os.path.isfile(report_path):
+    report_path = report_path or _of["comparison_report"]
+    if not os.path.isfile(report_path) or report_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.html')):
         return None, None
     try:
         with open(report_path, 'r', encoding='utf-8') as f:
@@ -334,10 +347,20 @@ def parse_chi_square_from_report(report_path=COMPARISON_REPORT):
         return None, None
 
 
+def _ensure_comparison_numeric(comparison_df):
+    """Coerce *_Count, *_Percent, Difference to numeric (CSV read can leave them as object)."""
+    out = comparison_df.copy()
+    for col in out.columns:
+        if col.endswith('_Count') or col.endswith('_Percent') or col == 'Difference':
+            out[col] = pd.to_numeric(out[col], errors='coerce')
+    return out
+
+
 def load_fixed_mode_data():
     """Load all data files for fixed outputs (comparison CSV and report written earlier in this run)."""
     print("Loading data for visualizations...")
-    comparison_df = pd.read_csv(COMPARISON_CSV)
+    comparison_df = pd.read_csv(_of["comparison_csv"])
+    comparison_df = _ensure_comparison_numeric(comparison_df)
     metadata = pd.read_csv(METADATA_CSV)
     clusters_df = pd.read_csv(CLUSTERS_CSV)
     clusters_df = _normalize_clusters_df(clusters_df)
@@ -385,15 +408,18 @@ def create_cluster_comparison_chart(comparison_df, categories, output_file):
     for i, (cat, pct_col) in enumerate(zip(categories, percent_cols)):
         offset = (i - (n_groups - 1) / 2) * width
         ax.bar(x + offset, top_clusters[pct_col], width, label=cat, color=colors[i], alpha=0.8)
-    ax.set_xlabel('Clusters', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
-    ax.set_title(f'Cluster Distribution by Group ({", ".join(categories)})', fontsize=14, fontweight='bold', pad=20)
+    fs_axis = _VIZ["chart"]["font_size_axis"]
+    fs_title = _VIZ["chart"]["font_size_title"]
+    ax.set_xlabel('Clusters', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_ylabel('Percentage (%)', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(f"{_VIZ["titles"]["cluster_distribution_by_group"]} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     ax.set_xticks(x)
-    ax.set_xticklabels(top_clusters['Cluster_Label'], rotation=45, ha='right', fontsize=9)
-    ax.legend(fontsize=11)
+    fs_tick = _VIZ["chart"]["font_size_tick"]
+    ax.set_xticklabels(top_clusters['Cluster_Label'], rotation=45, ha='right', fontsize=fs_tick, fontfamily=_VIZ["chart"]["font_family"])
+    ax.legend(fontsize=_VIZ["chart"]["font_size_legend"], prop={"family": _VIZ["chart"]["font_family"]})
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"], bbox_inches='tight')
     print(f"✓ Saved to {output_file}")
     plt.close()
 
@@ -411,13 +437,15 @@ def create_wordcloud(metadata, group_col, channel, output_file):
     if not channel_texts:
         return
     text = ' '.join(channel_texts)
-    wordcloud = WordCloud(width=1200, height=600, background_color='white', max_words=100, colormap='viridis', relative_scaling=0.5, collocations=False).generate(text)
+    wc_bg = _VIZ["chart"]["wordcloud_background"]
+    wc_cmap = _VIZ["chart"]["wordcloud_colormap"]
+    wordcloud = WordCloud(width=1200, height=600, background_color=wc_bg, max_words=100, colormap=wc_cmap, relative_scaling=0.5, collocations=False).generate(text)
     plt.figure(figsize=(12, 6))
     plt.imshow(wordcloud, interpolation='bilinear')
     plt.axis('off')
-    plt.title(f'Word Cloud: {channel}', fontsize=16, fontweight='bold', pad=20)
+    plt.title(f"{_VIZ["titles"]["wordcloud"]}: {channel}", fontsize=_VIZ["chart"]["font_size_title"] + 2, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"], bbox_inches='tight')
     print(f"✓ Saved to {output_file}")
     plt.close()
 
@@ -437,12 +465,15 @@ def create_cluster_heatmap(comparison_df, categories, output_file):
     heatmap_data = heatmap_data.set_index('Cluster_Label')
     heatmap_data.columns = categories
     fig, ax = plt.subplots(figsize=(10, 12))
-    sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap='YlOrRd', cbar_kws={'label': 'Percentage (%)'}, ax=ax, linewidths=0.5, linecolor='gray')
-    ax.set_title(f'Cluster Distribution by Group ({", ".join(categories)})', fontsize=14, fontweight='bold', pad=20)
-    ax.set_xlabel('Group', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Clusters', fontsize=12, fontweight='bold')
+    hm_cmap = _VIZ["chart"]["heatmap_cmap"]
+    sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap=hm_cmap, cbar_kws={'label': 'Percentage (%)'}, ax=ax, linewidths=0.5, linecolor='gray')
+    fs_axis = _VIZ["chart"]["font_size_axis"]
+    fs_title = _VIZ["chart"]["font_size_title"]
+    ax.set_title(f"{_VIZ["titles"]["cluster_distribution_by_group"]} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_xlabel('Group', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_ylabel('Clusters', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"], bbox_inches='tight')
     print(f"✓ Saved to {output_file}")
     plt.close()
 
@@ -457,15 +488,19 @@ def create_difference_chart(comparison_df, categories, output_file):
         return
     diff_label = f"{categories[0]} - {categories[1]}" if len(categories) == 2 else "Difference"
     fig, ax = plt.subplots(figsize=(12, 8))
-    colors = ['#2E86AB' if d > 0 else '#A23B72' for d in significant['Difference']]
+    c_pos = _VIZ["chart"]["difference_positive_color"]
+    c_neg = _VIZ["chart"]["difference_negative_color"]
+    colors = [c_pos if d > 0 else c_neg for d in significant['Difference']]
     ax.barh(significant['Cluster_Label'], significant['Difference'], color=colors, alpha=0.8)
     ax.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
-    ax.set_xlabel(f'Difference in Percentage ({diff_label})', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Clusters', fontsize=12, fontweight='bold')
-    ax.set_title('Significant Cluster Differences Between Groups', fontsize=14, fontweight='bold', pad=20)
+    fs_axis = _VIZ["chart"]["font_size_axis"]
+    fs_title = _VIZ["chart"]["font_size_title"]
+    ax.set_xlabel(f'Difference in Percentage ({diff_label})', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_ylabel('Clusters', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(_VIZ["titles"]["significant_differences"], fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     ax.grid(axis='x', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"], bbox_inches='tight')
     print(f"✓ Saved to {output_file}")
     plt.close()
 
@@ -474,14 +509,16 @@ def create_cluster_sizes_chart(clusters_df, total_rows, output_file, max_bars=25
     df = clusters_df.sort_values('Message_Count', ascending=False).head(max_bars)
     fig, ax = plt.subplots(figsize=(10, max(6, len(df) * 0.35)))
     y = np.arange(len(df))[::-1]
-    ax.barh(y, df['Message_Count'], color='#2E86AB', alpha=0.85)
+    bar_color = _VIZ["chart"]["bar_color"]
+    ax.barh(y, df['Message_Count'], color=bar_color, alpha=0.85)
     ax.set_yticks(y)
-    ax.set_yticklabels(df['Cluster_Label'], fontsize=9)
-    ax.set_xlabel('Number of rows', fontsize=11, fontweight='bold')
-    ax.set_title('Cluster sizes (top clusters by count)', fontsize=12, fontweight='bold', pad=12)
+    fs_tick = _VIZ["chart"]["font_size_tick"]
+    ax.set_yticklabels(df['Cluster_Label'], fontsize=fs_tick, fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_xlabel('Number of rows', fontsize=_VIZ["chart"]["font_size_axis"] - 1, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(_VIZ["titles"]["cluster_sizes"], fontsize=_VIZ["chart"]["font_size_axis"], fontweight='bold', pad=12, fontfamily=_VIZ["chart"]["font_family"])
     ax.grid(axis='x', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi_small"], bbox_inches='tight')
     plt.close()
     print(f"✓ Saved to {output_file}")
 
@@ -497,17 +534,19 @@ def create_cluster_proportions_pie(clusters_df, total_rows, output_file, top_n=1
     fig, ax = plt.subplots(figsize=(10, 8))
     colors = plt.cm.Set3(np.linspace(0, 1, len(sizes)))
     wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=90, pctdistance=0.75)
+    fs_tick = _VIZ["chart"]["font_size_tick"]
     for t in texts:
-        t.set_fontsize(8)
-    plt.setp(autotexts, size=8)
-    ax.set_title('Cluster proportions (top + Other)', fontsize=12, fontweight='bold', pad=12)
+        t.set_fontsize(max(7, fs_tick - 1))
+    plt.setp(autotexts, size=max(7, fs_tick - 1))
+    ax.set_title(_VIZ["titles"]["cluster_proportions_pie"], fontsize=_VIZ["chart"]["font_size_axis"], fontweight='bold', pad=12, fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi_small"], bbox_inches='tight')
     plt.close()
     print(f"✓ Saved to {output_file}")
 
 
-def write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2=None, chi2_p=None, output_file=OVERVIEW_REPORT_TXT):
+def write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2=None, chi2_p=None, output_file=None):
+    output_file = output_file or _of["overview_report"]
     lines = []
     lines.append("=" * 60)
     lines.append("OVERVIEW SUMMARY")
@@ -574,13 +613,14 @@ def create_cluster_mix_stacked_bar(comparison_df, categories, output_file, top_c
         heights = [values_by_group[cat][i] for cat in categories]
         ax.bar(categories, heights, bottom=bottom, label=lbl, color=colors[i], alpha=0.9)
         bottom += np.array(heights)
-    ax.set_ylabel('Percentage (%)', fontsize=11, fontweight='bold')
-    ax.set_title('Cluster mix within each group (top clusters + Other)', fontsize=12, fontweight='bold', pad=12)
+    fs_axis = _VIZ["chart"]["font_size_axis"]
+    ax.set_ylabel('Percentage (%)', fontsize=fs_axis - 1, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(_VIZ["titles"]["cluster_mix_stacked"], fontsize=fs_axis, fontweight='bold', pad=12, fontfamily=_VIZ["chart"]["font_family"])
     ax.set_ylim(0, 100)
-    ax.legend(fontsize=8, ncol=2, frameon=True)
+    ax.legend(fontsize=_VIZ["chart"]["font_size_tick"] - 1, ncol=2, frameon=True, prop={"family": _VIZ["chart"]["font_family"]})
     ax.grid(axis='y', alpha=0.25)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=250, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"] - 50 or 250, bbox_inches='tight')
     plt.close()
     print(f"✓ Saved to {output_file}")
 
@@ -608,21 +648,23 @@ def create_cluster_facets(comparison_df, categories, output_file, max_groups=5, 
             continue
         top = comparison_df.nlargest(top_clusters_per_group, pct_col)[['Cluster_Label', pct_col]].copy()
         top = top.sort_values(pct_col, ascending=True)
-        ax.barh(top['Cluster_Label'], top[pct_col], color='#2E86AB', alpha=0.85)
-        ax.set_title(str(cat), fontsize=12, fontweight='bold')
-        ax.set_xlabel('Percentage (%)', fontsize=10)
+        bar_color = _VIZ["chart"]["bar_color"]
+        ax.barh(top['Cluster_Label'], top[pct_col], color=bar_color, alpha=0.85)
+        ax.set_title(str(cat), fontsize=_VIZ["chart"]["font_size_axis"], fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
+        ax.set_xlabel('Percentage (%)', fontsize=_VIZ["chart"]["font_size_tick"] + 1, fontfamily=_VIZ["chart"]["font_family"])
         ax.grid(axis='x', alpha=0.25)
         ax.tick_params(axis='y', labelsize=8)
     for j in range(i + 1, len(axes)):
         axes[j].set_axis_off()
-    fig.suptitle('Cluster distribution by group (facets)', fontsize=14, fontweight='bold')
+    fig.suptitle(_VIZ["titles"]["cluster_facets"], fontsize=_VIZ["chart"]["font_size_title"], fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(output_file, dpi=250, bbox_inches='tight')
+    plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"] - 50 or 250, bbox_inches='tight')
     plt.close()
     print(f"✓ Saved to {output_file}")
 
 
-def create_treemap_html(comparison_df, categories, output_file=CLUSTER_TREEMAP_HTML):
+def create_treemap_html(comparison_df, categories, output_file=None):
+    output_file = output_file or _of["cluster_treemap"]
     print("Creating treemap (HTML)...")
     try:
         px = importlib.import_module("plotly.express")
@@ -650,7 +692,8 @@ def create_treemap_html(comparison_df, categories, output_file=CLUSTER_TREEMAP_H
     return True
 
 
-def create_sankey_html(comparison_df, categories, output_file=CLUSTER_SANKEY_HTML, top_clusters=20):
+def create_sankey_html(comparison_df, categories, output_file=None, top_clusters=20):
+    output_file = output_file or _of["cluster_sankey"]
     print("Creating Sankey diagram (HTML)...")
     try:
         go = importlib.import_module("plotly.graph_objects")
@@ -716,36 +759,36 @@ def fixed_outputs_mode():
     print(f"Groups: {categories}")
     print(f"Group-by column (word clouds): {group_col or 'not found'}")
     generated = []
-    write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2, chi2_p, OVERVIEW_REPORT_TXT)
-    generated.append(OVERVIEW_REPORT_TXT)
-    create_cluster_sizes_chart(clusters_df, total_rows, CLUSTER_SIZES_PNG)
-    generated.append(CLUSTER_SIZES_PNG)
-    create_cluster_proportions_pie(clusters_df, total_rows, CLUSTER_PROPORTIONS_PIE_PNG, top_n=10)
-    generated.append(CLUSTER_PROPORTIONS_PIE_PNG)
-    create_cluster_heatmap(comparison_df, categories, CLUSTER_HEATMAP_PNG)
-    generated.append(CLUSTER_HEATMAP_PNG)
-    create_cluster_mix_stacked_bar(comparison_df, categories, CLUSTER_MIX_STACKED_BAR_PNG, top_clusters=10)
-    generated.append(CLUSTER_MIX_STACKED_BAR_PNG)
+    write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2, chi2_p)
+    generated.append(_of["overview_report"])
+    create_cluster_sizes_chart(clusters_df, total_rows, _of["cluster_sizes"])
+    generated.append(_of["cluster_sizes"])
+    create_cluster_proportions_pie(clusters_df, total_rows, _of["cluster_proportions_pie"], top_n=10)
+    generated.append(_of["cluster_proportions_pie"])
+    create_cluster_heatmap(comparison_df, categories, _of["cluster_heatmap"])
+    generated.append(_of["cluster_heatmap"])
+    create_cluster_mix_stacked_bar(comparison_df, categories, _of["cluster_mix_stacked_bar"], top_clusters=10)
+    generated.append(_of["cluster_mix_stacked_bar"])
     if group_col and group_col in metadata.columns:
         for cat in categories:
             safe = re.sub(r'[^\w\-]', '_', str(cat))
-            out = f'wordcloud_{safe}.png'
+            out = f'{_of["wordcloud_prefix"]}{safe}.png'
             create_wordcloud(metadata, group_col, cat, out)
             generated.append(out)
     else:
         print("  Skipping word clouds (no group column in metadata)")
-    create_cluster_facets(comparison_df, categories, CLUSTER_FACETS_PNG, max_groups=5, top_clusters_per_group=12)
-    generated.append(CLUSTER_FACETS_PNG)
-    if create_treemap_html(comparison_df, categories, CLUSTER_TREEMAP_HTML):
-        generated.append(CLUSTER_TREEMAP_HTML)
-    if create_sankey_html(comparison_df, categories, CLUSTER_SANKEY_HTML, top_clusters=20):
-        generated.append(CLUSTER_SANKEY_HTML)
-    create_cluster_comparison_chart(comparison_df, categories, CLUSTER_COMPARISON_CHART_PNG)
+    create_cluster_facets(comparison_df, categories, _of["cluster_facets"], max_groups=5, top_clusters_per_group=12)
+    generated.append(_of["cluster_facets"])
+    if create_treemap_html(comparison_df, categories):
+        generated.append(_of["cluster_treemap"])
+    if create_sankey_html(comparison_df, categories, top_clusters=20):
+        generated.append(_of["cluster_sankey"])
+    create_cluster_comparison_chart(comparison_df, categories, _of["cluster_comparison_chart"])
     if len(categories) in (2, 3):
-        generated.append(CLUSTER_COMPARISON_CHART_PNG)
-    create_difference_chart(comparison_df, categories, CLUSTER_DIFFERENCES_CHART_PNG)
+        generated.append(_of["cluster_comparison_chart"])
+    create_difference_chart(comparison_df, categories, _of["cluster_differences_chart"])
     if 'Difference' in comparison_df.columns and 'P_Value' in comparison_df.columns:
-        generated.append(CLUSTER_DIFFERENCES_CHART_PNG)
+        generated.append(_of["cluster_differences_chart"])
     print("\n" + "=" * 60)
     print("Step 3 Complete!")
     print("=" * 60)
@@ -759,7 +802,7 @@ def llm_mode_interactive(confirm_before_run=False):
     """Interactive LLM mode: user prompts for ad-hoc numbers or visualizations."""
     dfs = {}
     for name, path in [
-        ("comparison_df", COMPARISON_CSV),
+        ("comparison_df", _of["comparison_csv"]),
         ("clusters_df", CLUSTERS_CSV),
         ("metadata_df", METADATA_CSV),
         ("metadata_with_clusters_df", METADATA_WITH_CLUSTERS_CSV),
@@ -876,8 +919,8 @@ if __name__ == '__main__':
     clusters_file = CLUSTERS_CSV
     metadata_file = METADATA_CSV
     metadata_with_clusters_file = METADATA_WITH_CLUSTERS_CSV
-    output_csv = COMPARISON_CSV
-    output_report = COMPARISON_REPORT
+    output_csv = _of["comparison_csv"]
+    output_report = _of["comparison_report"]
 
     try:
         clusters_df, metadata = load_data(clusters_file, metadata_file)
