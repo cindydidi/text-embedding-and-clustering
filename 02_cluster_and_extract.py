@@ -25,10 +25,13 @@ from collections import Counter
 from dotenv import load_dotenv
 
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
-    print("Warning: google-generativeai not installed. LLM labels will use fallback.")
+    print("Warning: google-genai not installed. LLM labels will use fallback.")
     genai = None
+
+# Client for Gemini API (set by configure_api when genai is available)
+_genai_client = None
 
 try:
     import hdbscan
@@ -59,13 +62,14 @@ _llm_label_cache = {}
 
 def configure_api():
     """Configure Google API with key from environment."""
+    global _genai_client
     if genai is None:
         return False
     api_key = os.getenv('GOOGLE_API_KEY')
     if not api_key:
         print("Warning: GOOGLE_API_KEY not found. LLM labels will use fallback.")
         return False
-    genai.configure(api_key=api_key)
+    _genai_client = genai.Client(api_key=api_key)
     return True
 
 def reduce_dimensions(embeddings, n_components=250):
@@ -454,15 +458,10 @@ def generate_cluster_label_llm(messages, cluster_id):
     
     # Try LLM generation
     if genai is not None:
-        try:
-            # Configure API if not already done
-            if not hasattr(genai, '_configured'):
-                if configure_api():
-                    genai._configured = True
-                else:
-                    genai._configured = False
-            
-            if genai._configured:
+        if _genai_client is None:
+            configure_api()
+        if _genai_client is not None:
+            try:
                 # Create prompt
                 messages_text = "\n".join([f"- {msg[:200]}" for msg in sample_messages[:8]])  # Limit message length
                 prompt = f"""Generate a concise cluster label (2-4 words) for these customer service messages. 
@@ -478,9 +477,8 @@ Cluster label (2-4 words only):"""
                 label = None
                 for model_name in model_names:
                     try:
-                        model = genai.GenerativeModel(model_name)
-                        response = model.generate_content(prompt)
-                        label = response.text.strip()
+                        response = _genai_client.models.generate_content(model=model_name, contents=prompt)
+                        label = (response.text or "").strip()
                         break
                     except Exception:
                         continue
@@ -494,9 +492,9 @@ Cluster label (2-4 words only):"""
                     result = (label, keywords)
                     _llm_label_cache[cache_key] = result
                     return result
-        except Exception as e:
-            print(f"\nWarning: LLM label generation failed for cluster {cluster_id}: {e}")
-            print("  Using fallback keyword extraction...")
+            except Exception as e:
+                print(f"\nWarning: LLM label generation failed for cluster {cluster_id}: {e}")
+                print("  Using fallback keyword extraction...")
     
     # Fallback to simple keyword extraction
     return generate_cluster_label_fallback(messages, cluster_id)
@@ -553,6 +551,10 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
     n_noise = (cluster_labels == -1).sum()
     if n_noise > 0:
         print(f"  Note: {n_noise:,} messages marked as noise (outliers) will be excluded from cluster analysis")
+    if total_clusters == 0:
+        print("  Warning: No non-noise clusters found (all points are noise). Output will be empty.")
+        empty_df = pd.DataFrame(columns=["Cluster_ID", "Cluster_Label", "Top_Keywords", "Message_Count", "Sample_Messages"])
+        return empty_df, metadata
     
     # Discover category columns from data: any column (except text/Cluster) with 2–200 unique values
     text_col = _text_column(metadata)

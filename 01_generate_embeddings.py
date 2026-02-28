@@ -14,11 +14,11 @@ from threading import Lock
 from dotenv import load_dotenv
 
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError as e:
     print(f"\n❌ Import Error: {e}")
     print("\nPlease install missing packages:")
-    print("  python3 -m pip install google-generativeai numpy pandas python-dotenv")
+    print("  python3 -m pip install google-genai numpy pandas python-dotenv")
     sys.exit(1)
 
 # Load environment variables from .env file
@@ -27,12 +27,17 @@ load_dotenv()
 # Column name for the embedded text in output metadata (used by steps 02 and 03)
 TEXT_COLUMN = "text"
 
+# Client for Gemini API (set by configure_api)
+_genai_client = None
+
+
 def configure_api():
     """Configure Google API with key from environment."""
+    global _genai_client
     api_key = os.getenv('GOOGLE_API_KEY')
     if not api_key:
         raise ValueError("GOOGLE_API_KEY not found in environment. Please set it in .env file or export it.")
-    genai.configure(api_key=api_key)
+    _genai_client = genai.Client(api_key=api_key)
     print("✓ Google API configured successfully")
 
 # Global cache for embeddings (text -> embedding)
@@ -59,12 +64,15 @@ def generate_embedding(text, model_name='models/gemini-embedding-001', max_retri
     # Generate new embedding
     for attempt in range(max_retries):
         try:
-            result = genai.embed_content(
-                model=model_name,
-                content=text,
-                task_type="RETRIEVAL_DOCUMENT"
+            # New SDK accepts model name with or without "models/" prefix
+            model_arg = model_name.replace("models/", "") if model_name.startswith("models/") else model_name
+            result = _genai_client.models.embed_content(
+                model=model_arg,
+                contents=text,
             )
-            embedding = result['embedding']
+            # Response has .embeddings (list of one for single content)
+            emb = result.embeddings[0]
+            embedding = list(emb.embedding) if hasattr(emb.embedding, '__iter__') and not isinstance(emb.embedding, str) else emb.embedding
             
             # Detect and store embedding dimension from first successful call
             global _embedding_dimension

@@ -94,10 +94,22 @@ def detect_category_columns(metadata_with_clusters):
     return candidates
 
 
+def _normalize_clusters_df(clusters_df):
+    """Ensure clusters DataFrame has Cluster_ID and Cluster_Label (rename from Topic_* if present)."""
+    if clusters_df is None or len(clusters_df) == 0:
+        return clusters_df
+    if 'Cluster_Label' not in clusters_df.columns and 'Topic_Label' in clusters_df.columns:
+        clusters_df = clusters_df.rename(columns={'Topic_Label': 'Cluster_Label'})
+    if 'Cluster_ID' not in clusters_df.columns and 'Topic_ID' in clusters_df.columns:
+        clusters_df = clusters_df.rename(columns={'Topic_ID': 'Cluster_ID'})
+    return clusters_df
+
+
 def load_data(clusters_file, metadata_file):
     """Load clustering results and metadata."""
     print("Loading data...")
     clusters_df = pd.read_csv(clusters_file)
+    clusters_df = _normalize_clusters_df(clusters_df)
     metadata = pd.read_csv(metadata_file)
     print(f"✓ Loaded {len(clusters_df)} clusters")
     print(f"✓ Loaded {len(metadata):,} rows")
@@ -113,6 +125,13 @@ def calculate_proportions(metadata_with_clusters, clusters_df, group_col, catego
         print(f"  Total rows - {cat}: {totals[cat]:,}")
     if total_all == 0:
         raise ValueError(f"No rows in any of the groups: {categories}")
+
+    if len(clusters_df) == 0:
+        print("  Warning: No clusters in clusters_with_labels.csv (e.g. all noise in step 02). Comparison will be empty.")
+        cols = ['Cluster_Label', 'Cluster_ID'] + [f'{c}_Count' for c in categories] + [f'{c}_Percent' for c in categories]
+        if len(categories) == 2:
+            cols.append('Difference')
+        return pd.DataFrame(columns=cols), totals
 
     comparison_data = []
     for _, cluster_row in clusters_df.iterrows():
@@ -261,11 +280,7 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, 
         report_lines.append(f"\n\nCELLS WITH LARGEST STANDARDIZED RESIDUALS (interpretation aid):")
         # Map cluster id -> label for readability
         id_to_label = dict(zip(comparison_df['Cluster_ID'], comparison_df['Cluster_Label']))
-        try:
-            flat = residuals_df.stack(dropna=True, future_stack=True).reset_index()
-        except TypeError:
-            # Older pandas without future_stack
-            flat = residuals_df.stack(dropna=True).reset_index()
+        flat = residuals_df.stack().reset_index()
         flat.columns = ['Cluster_ID', 'Group', 'Std_Residual']
         flat['Abs'] = flat['Std_Residual'].abs()
         top = flat.sort_values('Abs', ascending=False).head(10)
@@ -325,6 +340,7 @@ def load_fixed_mode_data():
     comparison_df = pd.read_csv(COMPARISON_CSV)
     metadata = pd.read_csv(METADATA_CSV)
     clusters_df = pd.read_csv(CLUSTERS_CSV)
+    clusters_df = _normalize_clusters_df(clusters_df)
     metadata_with_clusters = pd.read_csv(METADATA_WITH_CLUSTERS_CSV)
     print("✓ Data loaded")
     return comparison_df, metadata, clusters_df, metadata_with_clusters
@@ -754,14 +770,14 @@ def llm_mode_interactive(confirm_before_run=False):
         raise FileNotFoundError("No input CSVs found. Run step 02 first and this step (comparison) once without --llm.")
     try:
         from dotenv import load_dotenv
-        import google.generativeai as genai
+        from google import genai
     except Exception as e:
-        raise RuntimeError("LLM mode requires python-dotenv and google-generativeai. Install with: pip install python-dotenv google-generativeai") from e
+        raise RuntimeError("LLM mode requires python-dotenv and google-genai. Install with: pip install python-dotenv google-genai") from e
     load_dotenv()
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY not found. Put it in .env (same as step 02).")
-    genai.configure(api_key=api_key)
+    genai_client = genai.Client(api_key=api_key)
     try:
         px = importlib.import_module("plotly.express")
         go = importlib.import_module("plotly.graph_objects")
@@ -811,8 +827,7 @@ def llm_mode_interactive(confirm_before_run=False):
         last_err = None
         for model_name in model_names:
             try:
-                model = genai.GenerativeModel(model_name)
-                resp = model.generate_content(prompt)
+                resp = genai_client.models.generate_content(model=model_name, contents=prompt)
                 code = strip_code_fences(getattr(resp, "text", "") or "")
                 if code:
                     break
