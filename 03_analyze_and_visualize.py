@@ -53,8 +53,23 @@ CLUSTER_FACETS_PNG = 'cluster_distribution_facets.png'
 CLUSTER_TREEMAP_HTML = 'cluster_treemap.html'
 CLUSTER_SANKEY_HTML = 'cluster_group_sankey.html'
 
-# Columns to exclude from category detection
-EXCLUDE_FROM_CATEGORY = {'Message', 'Cluster', 'Cluster_ID', 'Cluster_Label'}
+# Column name for text content in metadata (must match step 01 output)
+TEXT_COLUMN = 'text'
+
+
+def _text_column(metadata_df):
+    """Return the text column name (prefer TEXT_COLUMN, fallback to 'Message' for old outputs)."""
+    if metadata_df is None or metadata_df.columns is None:
+        return TEXT_COLUMN
+    if TEXT_COLUMN in metadata_df.columns:
+        return TEXT_COLUMN
+    if 'Message' in metadata_df.columns:
+        return 'Message'
+    return TEXT_COLUMN
+
+
+# Columns to exclude from category detection (include both names for backward compatibility)
+EXCLUDE_FROM_CATEGORY = {TEXT_COLUMN, 'Message', 'Cluster', 'Cluster_ID', 'Cluster_Label'}
 MAX_CARDINALITY_FOR_CATEGORY = 50
 
 
@@ -85,7 +100,7 @@ def load_data(clusters_file, metadata_file):
     clusters_df = pd.read_csv(clusters_file)
     metadata = pd.read_csv(metadata_file)
     print(f"✓ Loaded {len(clusters_df)} clusters")
-    print(f"✓ Loaded {len(metadata):,} messages")
+    print(f"✓ Loaded {len(metadata):,} rows")
     return clusters_df, metadata
 
 
@@ -95,9 +110,9 @@ def calculate_proportions(metadata_with_clusters, clusters_df, group_col, catego
     total_all = sum(totals.values())
     print(f"\nGroup column: '{group_col}'")
     for cat in categories:
-        print(f"  Total messages - {cat}: {totals[cat]:,}")
+        print(f"  Total rows - {cat}: {totals[cat]:,}")
     if total_all == 0:
-        raise ValueError(f"No messages in any of the groups: {categories}")
+        raise ValueError(f"No rows in any of the groups: {categories}")
 
     comparison_data = []
     for _, cluster_row in clusters_df.iterrows():
@@ -207,7 +222,7 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, 
     report_lines.append("="*60)
     report_lines.append(f"CLUSTER COMPARISON BY '{group_col}'")
     report_lines.append("="*60)
-    report_lines.append(f"\nTotal messages per group:")
+    report_lines.append(f"\nTotal rows per group:")
     for cat in categories:
         report_lines.append(f"  {cat}: {totals[cat]:,}")
     report_lines.append(f"\nChi-Square Test Results:")
@@ -355,7 +370,7 @@ def create_cluster_comparison_chart(comparison_df, categories, output_file):
         offset = (i - (n_groups - 1) / 2) * width
         ax.bar(x + offset, top_clusters[pct_col], width, label=cat, color=colors[i], alpha=0.8)
     ax.set_xlabel('Clusters', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Percentage of Messages (%)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
     ax.set_title(f'Cluster Distribution by Group ({", ".join(categories)})', fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(top_clusters['Cluster_Label'], rotation=45, ha='right', fontsize=9)
@@ -373,10 +388,13 @@ def create_wordcloud(metadata, group_col, channel, output_file):
     col = metadata.get(group_col)
     if col is None:
         return
-    channel_messages = metadata[metadata[group_col].astype(str).str.strip() == str(channel)]['Message'].dropna().astype(str).tolist()
-    if not channel_messages:
+    text_col = _text_column(metadata)
+    if text_col not in metadata.columns:
         return
-    text = ' '.join(channel_messages)
+    channel_texts = metadata[metadata[group_col].astype(str).str.strip() == str(channel)][text_col].dropna().astype(str).tolist()
+    if not channel_texts:
+        return
+    text = ' '.join(channel_texts)
     wordcloud = WordCloud(width=1200, height=600, background_color='white', max_words=100, colormap='viridis', relative_scaling=0.5, collocations=False).generate(text)
     plt.figure(figsize=(12, 6))
     plt.imshow(wordcloud, interpolation='bilinear')
@@ -443,7 +461,7 @@ def create_cluster_sizes_chart(clusters_df, total_rows, output_file, max_bars=25
     ax.barh(y, df['Message_Count'], color='#2E86AB', alpha=0.85)
     ax.set_yticks(y)
     ax.set_yticklabels(df['Cluster_Label'], fontsize=9)
-    ax.set_xlabel('Number of messages', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Number of rows', fontsize=11, fontweight='bold')
     ax.set_title('Cluster sizes (top clusters by count)', fontsize=12, fontweight='bold', pad=12)
     ax.grid(axis='x', alpha=0.3)
     plt.tight_layout()
@@ -479,13 +497,13 @@ def write_overview_report(clusters_df, total_rows, group_col, categories, group_
     lines.append("OVERVIEW SUMMARY")
     lines.append("=" * 60)
     lines.append(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"Total messages in clusters: {int(total_rows):,}")
+    lines.append(f"Total rows in clusters: {int(total_rows):,}")
     lines.append(f"Number of clusters: {len(clusters_df)}")
     if categories:
         lines.append(f"Group-by column: {group_col or '(unknown)'}")
         lines.append(f"Number of groups: {len(categories)}")
         lines.append("")
-        lines.append("Messages per group:")
+        lines.append("Rows per group:")
         for cat in categories:
             n = group_totals.get(cat, 0)
             pct = (n / total_rows * 100) if total_rows else 0
@@ -540,7 +558,7 @@ def create_cluster_mix_stacked_bar(comparison_df, categories, output_file, top_c
         heights = [values_by_group[cat][i] for cat in categories]
         ax.bar(categories, heights, bottom=bottom, label=lbl, color=colors[i], alpha=0.9)
         bottom += np.array(heights)
-    ax.set_ylabel('Percentage of messages (%)', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Percentage (%)', fontsize=11, fontweight='bold')
     ax.set_title('Cluster mix within each group (top clusters + Other)', fontsize=12, fontweight='bold', pad=12)
     ax.set_ylim(0, 100)
     ax.legend(fontsize=8, ncol=2, frameon=True)
@@ -576,7 +594,7 @@ def create_cluster_facets(comparison_df, categories, output_file, max_groups=5, 
         top = top.sort_values(pct_col, ascending=True)
         ax.barh(top['Cluster_Label'], top[pct_col], color='#2E86AB', alpha=0.85)
         ax.set_title(str(cat), fontsize=12, fontweight='bold')
-        ax.set_xlabel('% of messages', fontsize=10)
+        ax.set_xlabel('Percentage (%)', fontsize=10)
         ax.grid(axis='x', alpha=0.25)
         ax.tick_params(axis='y', labelsize=8)
     for j in range(i + 1, len(axes)):

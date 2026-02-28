@@ -24,6 +24,9 @@ except ImportError as e:
 # Load environment variables from .env file
 load_dotenv()
 
+# Column name for the embedded text in output metadata (used by steps 02 and 03)
+TEXT_COLUMN = "text"
+
 def configure_api():
     """Configure Google API with key from environment."""
     api_key = os.getenv('GOOGLE_API_KEY')
@@ -310,8 +313,8 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
                     break
                 
                 texts.append(text)
-                # Pass through all columns from the input row; store embedded text as 'Message' for downstream scripts
-                metadata.append({**row, 'Message': text})
+                # Pass through all columns from the input row; store embedded text for downstream scripts
+                metadata.append({**row, TEXT_COLUMN: text})
             
             row_count += 1
             if row_count % 10000 == 0:

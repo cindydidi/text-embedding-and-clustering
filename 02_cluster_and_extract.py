@@ -41,6 +41,19 @@ except ImportError:
 # Load environment variables
 load_dotenv()
 
+# Column name for text content in metadata (must match step 01 output)
+TEXT_COLUMN = "text"
+
+
+def _text_column(metadata):
+    """Return the text column name (prefer TEXT_COLUMN, fallback to 'Message' for old outputs)."""
+    if TEXT_COLUMN in metadata.columns:
+        return TEXT_COLUMN
+    if "Message" in metadata.columns:
+        return "Message"
+    return None
+
+
 # Global cache for LLM-generated labels
 _llm_label_cache = {}
 
@@ -234,10 +247,11 @@ def _get_sentiment(text):
 
 def augment_embeddings_with_sentiment(embeddings, metadata, scale=0.5):
     """Append a sentiment dimension (-scale, 0, +scale) so clustering can separate by sentiment."""
-    if "Message" not in metadata.columns:
-        print("  Warning: No 'Message' column for sentiment; skipping.")
+    col = _text_column(metadata)
+    if col is None:
+        print("  Warning: No text column found for sentiment; skipping.")
         return embeddings
-    sentiments = np.array([_get_sentiment(metadata["Message"].iloc[i]) for i in range(len(metadata))], dtype=np.float64)
+    sentiments = np.array([_get_sentiment(metadata[col].iloc[i]) for i in range(len(metadata))], dtype=np.float64)
     # Reshape (n,) -> (n, 1), scale so it has visible effect but doesn't dominate
     extra = (sentiments * scale).reshape(-1, 1)
     n_pos = (sentiments == 1).sum()
@@ -540,8 +554,11 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
     if n_noise > 0:
         print(f"  Note: {n_noise:,} messages marked as noise (outliers) will be excluded from cluster analysis")
     
-    # Discover category columns from data: any column (except Message/Cluster) with 2–200 unique values
-    skip_cols = {"Message", "Cluster"}
+    # Discover category columns from data: any column (except text/Cluster) with 2–200 unique values
+    text_col = _text_column(metadata)
+    skip_cols = {"Cluster"}
+    if text_col:
+        skip_cols.add(text_col)
     category_columns = []
     for col in metadata.columns:
         if col in skip_cols:
@@ -556,8 +573,11 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
     start_time = time.time()
     
     for idx, cluster_id in enumerate(unique_clusters):
+        text_col = _text_column(metadata)
+        if not text_col:
+            continue
         raw = metadata.loc[
-            metadata["Cluster"] == cluster_id, "Message"
+            metadata["Cluster"] == cluster_id, text_col
         ].dropna().astype(str).str.strip()
         cluster_messages = [m for m in raw.tolist() if m]
         
