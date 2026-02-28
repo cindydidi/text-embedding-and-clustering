@@ -33,7 +33,7 @@ This folder contains three scripts that analyze text from a CSV: they turn text 
 - Required packages (install once):
 
 ```bash
-pip install google-generativeai numpy pandas python-dotenv scikit-learn matplotlib scipy seaborn wordcloud hdbscan plotly
+pip install google-genai numpy pandas python-dotenv scikit-learn matplotlib scipy seaborn wordcloud hdbscan plotly
 ```
 
 ### 3. Google API key (for Steps 1 and 2)
@@ -99,7 +99,7 @@ Detects the CSV in the folder (or uses the one you specify), sends each text row
 **What you get:**
 
 - **`embeddings.npy`** — numeric embeddings (used by Steps 2 and 3, or any other tool).
-- **`embeddings_metadata.csv`** — one row per text row; the embedded text is in a column named **Message**, and all other columns from your CSV are included.
+- **`embeddings_metadata.csv`** — one row per text row; the embedded text is in a column named **text**, and all other columns from your CSV are included.
 
 **Rough time:** Depends on how many rows you have; the script prints progress and estimated time.
 
