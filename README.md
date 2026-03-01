@@ -6,35 +6,31 @@
 
 ## What this does
 
-These tools help you **embed** text from a CSV (turn it into numbers), **cluster** it into topics, and **visualize** the results with reports and charts. You can do everything in the **web app** (easiest) or run the **scripts** from the command line if you prefer.
+Use this toolkit to **embed** CSV text into numerical vectors, **cluster** related data points, and **visualize** the results through interactive reports and charts.
 
-**Pipeline at a glance:**
-
-```mermaid
-flowchart LR
-  A[Embedding] --> B[Clustering] --> C[Visualization]
-```
-
-| Step | What it does |
-|------|--------------|
-| **Embedding** | Uses Google’s embedding model to turn text into vectors. |
-| **Clustering** | Groups text by meaning and gives each cluster a label. |
-| **Visualization** | Builds reports and charts (e.g. Plotly, or LLM-generated visuals). |
+Choose your workflow: Use the **Web App** for an intuitive, no-code experience, or run the **CLI scripts** for manual control and automation.
 
 ---
 
-## Web app (recommended)
+## Installation
 
-The easiest way to use the pipeline is the **web interface**: upload your CSV, click buttons to run Embedding → Clustering → Visualization, and change settings in the sidebar. You can also upload your own embedding or clustering files instead of running every step.
+Clone the repository and install dependencies:
+
+```bash
+git clone https://github.com/cindydidi/text-embedding-and-clustering
+cd text-embedding-and-clustering
+pip install -r requirements.txt
+```
+---
+
+## Web app
 
 ### Setup
 
+Run the pipeline in a **web interface**
+
 1. **Python 3** on your computer.
-2. Install packages once:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Create a **`.env`** file in this folder (same folder as `web_app.py`) with your Google API key:
+2. After cloning and installing (see [Installation](#installation) above), create a **`.env`** file in this folder (same folder as `web_app.py`) with your Google API key:
    ```
    GOOGLE_API_KEY=your_key_here
    ```
@@ -62,8 +58,6 @@ Run them in that order. Put your CSV in the same folder (or point to it with `--
 
 ```bash
 python 01_generate_embeddings.py --help
-python 02_cluster_and_extract.py --help
-python 03_analyze_and_visualize.py --help
 ```
 
 ---
