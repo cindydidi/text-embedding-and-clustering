@@ -4,12 +4,13 @@ Streamlit web app for the embedding pipeline: upload CSV, run embedding → clus
 edit config, and view results. Modern UI with Noto Sans and gradient accents.
 """
 
-import io
 import json
 import os
+import re
 import subprocess
 import sys
-import zipfile
+import threading
+import time
 from pathlib import Path
 
 # Load .env from repo root so subprocesses inherit GOOGLE_API_KEY (they run with cwd=workspace)
@@ -37,90 +38,107 @@ EMB_META = "embeddings_metadata.csv"
 CLUSTERS_CSV = "clusters_with_labels.csv"
 META_CLUSTERS_CSV = "metadata_with_clusters.csv"
 
-# Files produced by each step (for "Download all Step X" zip)
-STEP_1_FILES = [INPUT_CSV, EMB_NPY, EMB_META]
-STEP_2_FILES = [CLUSTERS_CSV, META_CLUSTERS_CSV]
-
-
-def _step_3_filenames():
-    """Step 3 output filenames from config + wordcloud_*.png pattern."""
-    names = []
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            of = cfg.get("visualization", {}).get("output_files", {})
-            for k, v in of.items():
-                if k == "wordcloud_prefix":
-                    continue
-                if isinstance(v, str):
-                    names.append(v)
-        except Exception:
-            pass
-    return names
-
-
-def _files_for_step(step: int, all_names: set[str]) -> list[str]:
-    """Return sorted list of filenames that belong to this step and exist in workspace."""
-    if step == 1:
-        candidates = STEP_1_FILES
-    elif step == 2:
-        candidates = STEP_2_FILES
-    else:
-        candidates = _step_3_filenames()
-        # Add any wordcloud_*.png present
-        candidates = list(candidates) + [n for n in all_names if n.startswith("wordcloud_") and n.endswith(".png")]
-    return sorted(n for n in candidates if n in all_names)
-
-
-def _make_zip_bytes(paths: list[Path]) -> bytes:
-    """Build a zip file in memory containing the given files (path -> name in zip)."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in paths:
-            if p.is_file():
-                zf.write(p, p.name)
-    buf.seek(0)
-    return buf.getvalue()
-
 
 def inject_css():
-    """Noto Sans + modern layout + gradient accents."""
+    """Noto Sans + Liquid Glass: frosted panels, pill header, AI gradient palette."""
     st.markdown("""
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-    /* Global font and modern base */
+    /* Page background: soft gradient instead of white */
+    .stApp, [data-testid="stAppViewContainer"] {
+        background: linear-gradient(165deg, #f0fdfa 0%, #ecfeff 25%, #fefce8 50%, #fef9c3 100%) !important;
+    }
+    /* Top bar: full-width transparent background */
+    header[data-testid="stHeader"],
+    .stApp header {
+        background: transparent !important;
+        width: 100% !important;
+        left: 0 !important;
+        right: 0 !important;
+    }
+    /* Global font */
     html, body, [class*="css"] {
         font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     }
-    /* Gradient header */
+    /* Pill-shaped title banner: fit to text, compact */
     .gradient-header {
-        background: linear-gradient(135deg, #0f766e 0%, #0e7490 50%, #6366f1 100%);
-        padding: 1.2rem 1.5rem;
-        border-radius: 12px;
+        display: inline-block;
+        background: linear-gradient(135deg, #86efac 0%, #bef264 50%, #fde047 100%);
+        color: #14532d;
+        padding: 0.5rem 1.25rem;
+        border-radius: 9999px;
         margin-bottom: 1.5rem;
-        color: white;
-        box-shadow: 0 4px 14px rgba(15, 118, 110, 0.25);
+        border: none;
+        box-shadow: none;
+        backdrop-filter: blur(12px);
     }
-    .gradient-header h1 { margin: 0; font-size: 1.6rem; font-weight: 700; }
-    .gradient-header p { margin: 0.4rem 0 0 0; opacity: 0.95; font-size: 0.95rem; }
-    /* Sidebar gradient */
+    .gradient-header h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
+    .gradient-header p {
+        margin: 0.4rem 0 0.5rem 0;
+        padding: 0;
+        text-align: center;
+        opacity: 0.9;
+        font-size: 0.85rem;
+        color: #166534;
+    }
+    /* Action blocks: each column gets a glass bar/block, no border */
+    section[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"] {
+        background: rgba(255, 255, 255, 0.5);
+        backdrop-filter: blur(10px);
+        border-radius: 12px;
+        padding: 1rem;
+        box-shadow: none;
+    }
+    /* Sidebar: very light blue/green tint, frosted */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #f0fdfa 0%, #ecfeff 50%, #eef2ff 100%) !important;
+        background: linear-gradient(180deg, rgba(240, 253, 250, 0.95) 0%, rgba(236, 254, 255, 0.95) 50%, rgba(254, 249, 195, 0.6) 100%) !important;
+        backdrop-filter: blur(12px);
     }
-    /* Primary button gradient (via container) */
+    [data-testid="stSidebar"] > div { background: transparent !important; }
+    /* Expanders / blocks: glass panels, no border */
+    .stExpander {
+        border-radius: 12px;
+        border: none;
+        background: rgba(255, 255, 255, 0.45);
+        backdrop-filter: blur(8px);
+        box-shadow: none;
+    }
+    /* Main blocks: no border, blend with background */
+    [data-testid="stVerticalBlock"] > div {
+        border-radius: 12px;
+        border: none;
+    }
+    [data-testid="stExpander"] {
+        border: none !important;
+    }
+    /* Primary button */
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
         transition: box-shadow 0.2s;
     }
     .stButton > button:hover {
-        box-shadow: 0 4px 12px rgba(15, 118, 110, 0.3);
+        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.25);
     }
-    /* Cards / expanders */
-    .stExpander {
-        border-radius: 8px;
-        border: 1px solid #e2e8f0;
+    /* Embedding CSV upload: button-style, hide default text and Browse, show limit on info icon */
+    .csv-upload-info { color: #9ca3af; cursor: help; font-size: 1rem; display: inline-block; vertical-align: middle; }
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type section {
+        min-height: 2.5rem !important;
+        padding: 0.5rem 1rem !important;
+        border-radius: 8px !important;
+        border: 1px solid #e5e7eb !important;
+        background: #ffffff !important;
+    }
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type section div[data-testid="stFileUploaderDropzoneInstructions"],
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type p,
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type small,
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type a {
+        display: none !important;
+    }
+    main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type section::before {
+        content: "Upload your CSV";
+        font-weight: 500;
+        color: #374151;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -137,6 +155,58 @@ def save_config(config):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+# Regex to parse embedding script progress: "Progress: 45.2% (4,521/10,000) | Rate: 12.3 text/s | ETA: 7.4 min"
+_PROGRESS_RE = re.compile(
+    r"Progress:\s*([\d.]+)%\s*\([\d,]+\/[\d,]+\)\s*\|\s*Rate:\s*([\d.]+)\s*text/s\s*\|\s*ETA:\s*([\d.]+)\s*min"
+)
+
+
+def _read_stdout_parse_progress(process, latest):
+    """Thread: read process.stdout; parse progress lines and set latest[0] = (pct, rate, eta)."""
+    buf = ""
+    while True:
+        chunk = process.stdout.read(4096)
+        if not chunk:
+            break
+        buf += chunk
+        for part in buf.split("\r"):
+            m = _PROGRESS_RE.search(part)
+            if m:
+                latest[0] = (float(m.group(1)) / 100.0, float(m.group(2)), float(m.group(3)))
+        if "\r" in buf:
+            buf = buf[buf.rfind("\r") + 1 :]
+
+
+def run_embedding_with_progress(script_path, args, cwd):
+    """Run embedding script with Popen; stream stdout, parse progress; show progress bar + ETA. Returns (returncode, stdout, stderr)."""
+    cmd = [sys.executable, str(script_path)] + args
+    env = {**os.environ}
+    process = subprocess.Popen(
+        cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1
+    )
+    latest = [None]  # latest[0] = (pct, rate, eta) or None
+    reader = threading.Thread(target=_read_stdout_parse_progress, args=(process, latest))
+    reader.daemon = True
+    reader.start()
+
+    progress_placeholder = st.empty()
+    last_pct, last_rate, last_eta = 0.0, 0.0, 0.0
+    while process.poll() is None:
+        if latest[0] is not None:
+            last_pct, last_rate, last_eta = latest[0]
+        with progress_placeholder.container():
+            st.progress(min(1.0, last_pct))
+            if last_rate > 0 or last_eta > 0:
+                st.caption(f"Rate: {last_rate:.1f} text/s · ETA: {last_eta:.1f} min")
+            else:
+                st.caption("Starting…")
+        time.sleep(0.3)
+    reader.join(timeout=1.0)
+    stdout, stderr = process.communicate()
+    progress_placeholder.empty()
+    return process.returncode, stdout or "", stderr or ""
 
 
 def run_script(script_path, args, cwd):
@@ -168,14 +238,14 @@ def get_string_columns(df, sample_size=500):
 
 
 # --- Page config and CSS ---
-st.set_page_config(page_title="Embedding Pipeline", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Embedding and Clustering", page_icon="📊", layout="wide")
 inject_css()
 
-# --- Header ---
+# --- Pill title banner ---
 st.markdown("""
 <div class="gradient-header">
-<h1>📊 Embedding and Clustering Pipeline</h1>
-<p>Upload your data in CSV, run embedding → clustering → visualization in one single pipeline. Edit config in the sidebar.</p>
+<h1>Embedding, Clustering and Visualization Pipeline</h1>
+<p>Upload CSV, run each step, or use your own outputs. Settings in the sidebar.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -185,18 +255,38 @@ if "last_stdout" not in st.session_state:
 if "last_stderr" not in st.session_state:
     st.session_state.last_stderr = {}
 
-# --- Sidebar: Config editor ---
+# --- Sidebar: collapsible expanders in step order ---
+config = load_config()
 with st.sidebar:
-    st.subheader("⚙️ Config")
-    config = load_config()
+    st.subheader("Settings")
 
-    with st.expander("Sentiment words", expanded=True):
+    with st.expander("Embedding", expanded=True):
+        embed_test = st.number_input("Test rows (0 = all)", min_value=0, value=0, key="et")
+        embed_skip = st.number_input("Skip first N rows", min_value=0, value=0, key="embed_skip")
+        embed_workers = st.number_input("Workers", min_value=1, max_value=12, value=6, key="ew")
+        embed_sequential = st.checkbox("Sequential (no parallel)", value=False, key="embed_sequential")
+
+    with st.expander("Clustering", expanded=True):
+        algorithm = st.selectbox("Algorithm", ["hdbscan", "kmeans", "agglomerative"], key="algo")
+        k_val = st.number_input("K (kmeans/agglomerative)", min_value=2, value=10, key="k_val")
+        min_cluster_size = st.number_input("Min cluster size", min_value=1, value=5, key="min_cluster_size")
+        dimensions = st.number_input("Dimensions (dim reduction)", min_value=2, value=250, key="dimensions")
+        assign_noise = st.checkbox("Assign noise to nearest cluster", value=False, key="assign_noise")
+        no_dim_reduction = st.checkbox("No dimension reduction", value=False, key="no_dim_reduction")
+        use_llm = st.checkbox("Use LLM for cluster labels", value=True, key="use_llm")
+        use_sentiment = st.checkbox("Sentiment-aided clustering", value=True, key="use_sentiment")
+
+    with st.expander("Sentiment words", expanded=False):
         neg = config.get("sentiment_words", {}).get("negative", [])
         pos = config.get("sentiment_words", {}).get("positive", [])
-        neg_text = st.text_area("Negative (comma or newline)", value="\n".join(neg) if isinstance(neg, list) else str(neg), height=120)
-        pos_text = st.text_area("Positive (comma or newline)", value="\n".join(pos) if isinstance(pos, list) else str(pos), height=120)
+        neg_text = st.text_area("Negative (comma or newline)", value="\n".join(neg) if isinstance(neg, list) else str(neg), height=120, key="neg_words")
+        pos_text = st.text_area("Positive (comma or newline)", value="\n".join(pos) if isinstance(pos, list) else str(pos), height=120, key="pos_words")
 
-    with st.expander("Chart & colors", expanded=True):
+    with st.expander("Visualization", expanded=False):
+        compare_only = st.checkbox("Compare only", value=False, key="compare_only")
+        confirm = st.checkbox("Confirm", value=False, key="confirm")
+
+    with st.expander("Color and chart", expanded=False):
         viz = config.get("visualization", {})
         chart = viz.get("chart", {})
         bar_color = st.text_input("Bar color (HEX or RGB)", value=chart.get("bar_color", "#2E86AB"), key="bar_color")
@@ -219,7 +309,7 @@ with st.sidebar:
             except json.JSONDecodeError as e:
                 st.error(f"Invalid JSON: {e}")
 
-    if st.button("💾 Save config (structured)", key="save_structured"):
+    if st.button("Save config (structured)", key="save_structured"):
         def parse_words(t):
             out = []
             for line in t.replace(",", "\n").splitlines():
@@ -227,7 +317,6 @@ with st.sidebar:
                 if w:
                     out.append(w)
             return out
-
         if "sentiment_words" not in config:
             config["sentiment_words"] = {}
         config["sentiment_words"]["negative"] = parse_words(neg_text)
@@ -245,82 +334,60 @@ with st.sidebar:
         save_config(config)
         st.success("Config saved.")
 
-# --- Main: CSV upload for Step 1 ---
-st.subheader("📁 Upload your CSV")
-uploaded = st.file_uploader("Choose a CSV", type=["csv"])
+# --- Main: 3 action blocks (each with its uploader) ---
 text_column_override = None
+
+# ---- Step 1: Embedding (CSV upload mandatory in this block) ----
+st.markdown("**► Embedding**")
+can_embed = (WORKSPACE / INPUT_CSV).exists()
+upload_col, icon_col = st.columns([6, 1])
+with upload_col:
+    uploaded = st.file_uploader("", type=["csv"], key="csv_upload", label_visibility="collapsed")
+with icon_col:
+    st.markdown(
+        '<span class="csv-upload-info" title="Limit 200MB per file • CSV">ⓘ</span>',
+        unsafe_allow_html=True,
+    )
 if uploaded is not None:
     df_preview = pd.read_csv(uploaded, nrows=5)
-    st.dataframe(pd.DataFrame(df_preview), width="stretch")
+    st.dataframe(df_preview, use_container_width=True)
     all_cols = list(df_preview.columns)
-    uploaded.seek(0)  # reset after first read so second read gets data
     string_cols = get_string_columns(pd.read_csv(uploaded, nrows=500))
     if not string_cols:
         string_cols = all_cols
     if len(string_cols) > 1:
-        text_column_override = st.selectbox("Text column for embedding", options=string_cols, key="text_col_select")
+        text_column_override = st.selectbox("Text column", options=string_cols, key="text_col_select")
     else:
         text_column_override = string_cols[0] if string_cols else all_cols[0]
     path = WORKSPACE / INPUT_CSV
     with open(path, "wb") as f:
         f.write(uploaded.getvalue())
-    st.caption(f"Saved as `{INPUT_CSV}` in workspace.")
-elif (WORKSPACE / INPUT_CSV).exists():
-    # Already have CSV in workspace from before; offer column choice for re-runs
+    can_embed = True
+    st.caption(f"Saved as `{INPUT_CSV}`.")
+elif can_embed:
     try:
         df_ws = pd.read_csv(WORKSPACE / INPUT_CSV, nrows=500)
-        all_cols = list(df_ws.columns)
         string_cols = get_string_columns(df_ws)
         if not string_cols:
-            string_cols = all_cols
+            string_cols = list(df_ws.columns)
         if len(string_cols) >= 1:
-            text_column_override = st.selectbox("Text column for embedding (from existing file)", options=string_cols, key="text_col_ws")
+            text_column_override = st.selectbox("Text column (existing file)", options=string_cols, key="text_col_ws")
     except Exception:
         pass
-
-# --- Optional uploads: Clustering inputs ---
-with st.expander("Use your own embedding outputs (optional)"):
-    emb_npy = st.file_uploader("embeddings.npy", type=["npy"], key="up_emb_npy")
-    emb_meta = st.file_uploader("embeddings_metadata.csv", type=["csv"], key="up_emb_meta")
-    if emb_npy and emb_meta:
-        with open(WORKSPACE / EMB_NPY, "wb") as f:
-            f.write(emb_npy.getvalue())
-        emb_meta_df = pd.read_csv(emb_meta)
-        emb_meta_df.to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
-        st.success("Saved to workspace. You can run Clustering.")
-
-# --- Optional uploads: Visualization inputs ---
-with st.expander("Use your own clustering outputs (optional)"):
-    up_clusters = st.file_uploader("clusters_with_labels.csv", type=["csv"], key="up_clusters")
-    up_meta_cl = st.file_uploader("metadata_with_clusters.csv", type=["csv"], key="up_meta_cl")
-    if up_clusters and up_meta_cl:
-        pd.read_csv(up_clusters).to_csv(WORKSPACE / CLUSTERS_CSV, index=False, encoding="utf-8-sig")
-        pd.read_csv(up_meta_cl).to_csv(WORKSPACE / META_CLUSTERS_CSV, index=False, encoding="utf-8-sig")
-        st.success("Saved to workspace. You can run Visualization.")
-    up_emb_meta_viz = st.file_uploader("embeddings_metadata.csv (optional, for word clouds)", type=["csv"], key="up_emb_meta_viz")
-    if up_emb_meta_viz:
-        pd.read_csv(up_emb_meta_viz).to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
-        st.caption("Saved embeddings_metadata.csv for word clouds.")
-
-# --- Pipeline buttons ---
-st.subheader("▶ Run pipeline")
-
-# 1. Embedding
-can_embed = (WORKSPACE / INPUT_CSV).exists()
 if not can_embed:
-    st.caption("Make sure your CSV is uploaded above.")
-with st.expander("**1. Embedding** — Edit settings", expanded=False):
-    embed_workers = st.number_input("Workers", min_value=1, max_value=12, value=6, key="ew")
-    embed_test = st.number_input("Test rows (0 = all)", min_value=0, value=0, key="et")
+    st.caption("Upload a CSV to run Embedding.")
 if st.button("Run Embedding", disabled=not can_embed, key="btn_embed"):
     args = ["--input", str(WORKSPACE / INPUT_CSV)]
     if text_column_override:
         args += ["--text-column", text_column_override]
-    args += ["--workers", str(embed_workers)]
-    if embed_test and embed_test > 0:
-        args += ["--test", str(embed_test)]
-    with st.spinner("Running..."):
-        code, out, err = run_script(SCRIPT_01, args, WORKSPACE)
+    args += ["--workers", str(st.session_state.get("ew", 6))]
+    if st.session_state.get("et", 0) > 0:
+        args += ["--test", str(st.session_state.et)]
+    if st.session_state.get("embed_skip", 0) > 0:
+        args += ["--skip", str(st.session_state.embed_skip)]
+    if st.session_state.get("embed_sequential", False):
+        args.append("--sequential")
+    code, out, err = run_embedding_with_progress(SCRIPT_01, args, WORKSPACE)
     st.session_state.last_stdout["embed"] = out
     st.session_state.last_stderr["embed"] = err
     if code == 0:
@@ -332,27 +399,34 @@ if st.button("Run Embedding", disabled=not can_embed, key="btn_embed"):
         if err:
             st.text(err[-2000:] if len(err) > 2000 else err)
 
-# 2. Clustering
+# ---- Step 2: Clustering (optional: use your own embedding outputs) ----
+st.markdown("**► Clustering**")
+with st.expander("Use your own embedding (optional)", expanded=False):
+    emb_npy = st.file_uploader("embeddings.npy", type=["npy"], key="up_emb_npy")
+    emb_meta = st.file_uploader("embeddings_metadata.csv", type=["csv"], key="up_emb_meta")
+    if emb_npy and emb_meta:
+        with open(WORKSPACE / EMB_NPY, "wb") as f:
+            f.write(emb_npy.getvalue())
+        emb_meta_df = pd.read_csv(emb_meta)
+        emb_meta_df.to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
+        st.caption("Saved. You can run Clustering.")
 can_cluster = workspace_has(EMB_NPY, EMB_META)
 if not can_cluster:
     st.caption("Run Embedding or upload embeddings above.")
-with st.expander("**2. Clustering** — Edit settings", expanded=False):
-    use_llm = st.checkbox("Use LLM for cluster labels", value=True, key="use_llm")
-    algorithm = st.selectbox("Algorithm", ["hdbscan", "kmeans", "agglomerative"], key="algo")
-    assign_noise = st.checkbox("Assign noise to nearest cluster", value=False, key="assign_noise")
-    use_sentiment = st.checkbox("Use sentiment-aided clustering", value=True, key="use_sentiment")
-    k_val = st.number_input("K (kmeans/agglomerative)", min_value=2, value=10, key="k_val")
 if st.button("Run Clustering", disabled=not can_cluster, key="btn_cluster"):
-    args = []
-    if not use_llm:
+    args = ["--algorithm", st.session_state.get("algo", "hdbscan")]
+    if not st.session_state.get("use_llm", True):
         args.append("--no-llm")
-    args += ["--algorithm", algorithm]
-    if assign_noise:
+    if st.session_state.get("assign_noise", False):
         args.append("--assign-noise")
-    if not use_sentiment:
+    if not st.session_state.get("use_sentiment", True):
         args.append("--no-sentiment")
-    if algorithm in ("kmeans", "agglomerative"):
-        args += ["--k", str(k_val)]
+    if st.session_state.get("algo", "hdbscan") in ("kmeans", "agglomerative"):
+        args += ["--k", str(st.session_state.get("k_val", 10))]
+    args += ["--min-cluster-size", str(st.session_state.get("min_cluster_size", 5))]
+    args += ["--dimensions", str(st.session_state.get("dimensions", 250))]
+    if st.session_state.get("no_dim_reduction", False):
+        args.append("--no-dim-reduction")
     with st.spinner("Running..."):
         code, out, err = run_script(SCRIPT_02, args, WORKSPACE)
     st.session_state.last_stdout["cluster"] = out
@@ -366,23 +440,34 @@ if st.button("Run Clustering", disabled=not can_cluster, key="btn_cluster"):
         if err:
             st.text(err[-2000:] if len(err) > 2000 else err)
 
-# 3. Data / Visualization
+# ---- Step 3: Visualization (optional: use your own clustering outputs) ----
+st.markdown("**► Visualization**")
+with st.expander("Use your own clusters (optional)", expanded=False):
+    up_clusters = st.file_uploader("clusters_with_labels.csv", type=["csv"], key="up_clusters")
+    up_meta_cl = st.file_uploader("metadata_with_clusters.csv", type=["csv"], key="up_meta_cl")
+    if up_clusters and up_meta_cl:
+        pd.read_csv(up_clusters).to_csv(WORKSPACE / CLUSTERS_CSV, index=False, encoding="utf-8-sig")
+        pd.read_csv(up_meta_cl).to_csv(WORKSPACE / META_CLUSTERS_CSV, index=False, encoding="utf-8-sig")
+        st.caption("Saved. You can run Visualization.")
+    up_emb_meta_viz = st.file_uploader("embeddings_metadata.csv (for word clouds)", type=["csv"], key="up_emb_meta_viz")
+    if up_emb_meta_viz:
+        pd.read_csv(up_emb_meta_viz).to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
 can_viz = workspace_has(CLUSTERS_CSV, META_CLUSTERS_CSV)
 if not can_viz:
     st.caption("Run Clustering or upload cluster outputs above.")
 meta_path = WORKSPACE / META_CLUSTERS_CSV
-cat_candidates = []
+group_by_col = None
 if meta_path.exists():
     try:
         mdf = pd.read_csv(meta_path, nrows=1000)
         exclude = {"text", "Message", "Cluster", "Cluster_ID", "Cluster_Label"}
         cat_candidates = [c for c in mdf.columns if c not in exclude and mdf[c].nunique() <= 50]
+        if cat_candidates:
+            group_by_col = st.selectbox("Group by column", ["Auto"] + cat_candidates, key="group_by")
     except Exception:
         pass
-with st.expander("**3. Data / Visualization** — Edit settings", expanded=False):
-    group_by_col = st.selectbox("Group by column", ["Auto"] + cat_candidates, key="group_by")
-    groups_text = st.text_input("Groups (optional, space-separated)", placeholder="e.g. Website Mobile", key="groups")
-    use_llm_viz = st.checkbox("Interactive LLM mode", value=False, key="use_llm_viz")
+groups_text = st.text_input("Groups (optional, space-separated)", placeholder="e.g. Website Mobile", key="groups")
+use_llm_viz = st.checkbox("Interactive LLM mode", value=False, key="use_llm_viz")
 if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
     args = []
     if group_by_col and group_by_col != "Auto":
@@ -391,6 +476,10 @@ if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
         args += ["--groups"] + groups_text.strip().split()
     if use_llm_viz:
         args.append("--llm")
+    if st.session_state.get("compare_only", False):
+        args.append("--compare-only")
+    if st.session_state.get("confirm", False):
+        args.append("--confirm")
     with st.spinner("Running..."):
         code, out, err = run_script(SCRIPT_03, args, WORKSPACE)
     st.session_state.last_stdout["viz"] = out
@@ -398,89 +487,38 @@ if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
     if code == 0:
         st.success("Done.")
     else:
-        has_viz_outputs = any(
-            f.suffix.lower() in (".png", ".html", ".txt") and f.is_file()
-            for f in (WORKSPACE.iterdir() if WORKSPACE.exists() else [])
-        )
-        if has_viz_outputs:
-            st.warning("Done with errors. Some charts may have been skipped. Check the log.")
-        else:
-            st.error("Failed.")
+        st.error("Failed.")
     with st.expander("Log"):
         st.text(out[-3000:] if len(out) > 3000 else out)
         if err:
             st.text(err[-2000:] if len(err) > 2000 else err)
 
 # --- Results ---
-st.subheader("📂 Results")
+st.subheader("📂 Outputs")
 out_files = list(WORKSPACE.iterdir()) if WORKSPACE.exists() else []
 out_files = [f for f in out_files if f.is_file()]
-all_names = {f.name for f in out_files}
 
-step_labels = {1: "1. Embedding", 2: "2. Clustering", 3: "3. Visualization"}
-for step in (1, 2, 3):
-    step_files = _files_for_step(step, all_names)
-    if not step_files:
-        continue
-    paths = [WORKSPACE / n for n in step_files]
-    st.markdown(f"**{step_labels[step]}**")
-    zip_bytes = _make_zip_bytes(paths)
-    st.download_button(
-        f"📥 Download all {step_labels[step]} outputs ({len(paths)} file{'s' if len(paths) != 1 else ''})",
-        data=zip_bytes,
-        file_name=f"step_{step}_outputs.zip",
-        mime="application/zip",
-        key=f"dl_step_{step}_zip",
-    )
-    for f in sorted(paths, key=lambda p: p.name):
-        if not f.is_file():
-            continue
-        name = f.name
-        if name.endswith(".csv"):
-            try:
-                df = pd.read_csv(f, nrows=100)
-                st.markdown(f"  _{name}_")
-                st.dataframe(pd.DataFrame(df), width="stretch")
-            except Exception:
-                st.caption(f"  {name}")
-        elif name.endswith(".png"):
-            st.markdown(f"  _{name}_")
-            st.image(str(f), width="stretch")
-        elif name.endswith(".html"):
-            st.markdown(f"  _{name}_")
-            with open(f, "rb") as fp:
-                st.download_button(f"Open / save {name}", data=fp.read(), file_name=name, mime="text/html", key=f"dl_{name}")
-        elif name.endswith((".txt", ".npy")):
-            st.caption(f"  {name}")
-    st.divider()
-
-# Show any files not assigned to a step (e.g. from older runs)
-assigned = set()
-for step in (1, 2, 3):
-    assigned.update(_files_for_step(step, all_names))
-other_files = sorted([f for f in out_files if f.name not in assigned], key=lambda x: x.name)
-if other_files:
-    st.markdown("**Other files**")
-    for f in other_files:
-        name = f.name
-        if name.endswith(".csv"):
-            try:
-                df = pd.read_csv(f, nrows=100)
-                st.markdown(f"**{name}**")
-                st.dataframe(pd.DataFrame(df), width="stretch")
-            except Exception:
-                st.caption(name)
-            with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_other_{name}")
-        elif name.endswith(".png"):
+for f in sorted(out_files, key=lambda x: x.name):
+    name = f.name
+    if name.endswith(".csv"):
+        try:
+            df = pd.read_csv(f, nrows=100)
             st.markdown(f"**{name}**")
-            st.image(str(f), width="stretch")
+            st.dataframe(df, width="stretch")
             with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="image/png", key=f"dl_other_{name}")
-        elif name.endswith(".html"):
-            st.markdown(f"**{name}**")
+                st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="text/csv", key=f"dl_{name}")
+        except Exception:
             with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="text/html", key=f"dl_other_{name}")
-        else:
-            with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_other_{name}")
+                st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_{name}")
+    elif name.endswith(".png"):
+        st.markdown(f"**{name}**")
+        st.image(str(f), width="stretch")
+        with open(f, "rb") as fp:
+            st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="image/png", key=f"dl_{name}")
+    elif name.endswith(".html"):
+        st.markdown(f"**{name}**")
+        with open(f, "rb") as fp:
+            st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="text/html", key=f"dl_{name}")
+    elif name.endswith((".txt", ".npy")):
+        with open(f, "rb") as fp:
+            st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_{name}")
