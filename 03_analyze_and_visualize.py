@@ -412,7 +412,7 @@ def create_cluster_comparison_chart(comparison_df, categories, output_file):
     fs_title = _VIZ["chart"]["font_size_title"]
     ax.set_xlabel('Clusters', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
     ax.set_ylabel('Percentage (%)', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
-    ax.set_title(f"{_VIZ["titles"]["cluster_distribution_by_group"]} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(f"{_VIZ['titles']['cluster_distribution_by_group']} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     ax.set_xticks(x)
     fs_tick = _VIZ["chart"]["font_size_tick"]
     ax.set_xticklabels(top_clusters['Cluster_Label'], rotation=45, ha='right', fontsize=fs_tick, fontfamily=_VIZ["chart"]["font_family"])
@@ -443,7 +443,7 @@ def create_wordcloud(metadata, group_col, channel, output_file):
     plt.figure(figsize=(12, 6))
     plt.imshow(wordcloud, interpolation='bilinear')
     plt.axis('off')
-    plt.title(f"{_VIZ["titles"]["wordcloud"]}: {channel}", fontsize=_VIZ["chart"]["font_size_title"] + 2, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
+    plt.title(f"{_VIZ['titles']['wordcloud']}: {channel}", fontsize=_VIZ["chart"]["font_size_title"] + 2, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout()
     plt.savefig(output_file, dpi=_VIZ["chart"]["dpi"], bbox_inches='tight')
     print(f"✓ Saved to {output_file}")
@@ -469,7 +469,7 @@ def create_cluster_heatmap(comparison_df, categories, output_file):
     sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap=hm_cmap, cbar_kws={'label': 'Percentage (%)'}, ax=ax, linewidths=0.5, linecolor='gray')
     fs_axis = _VIZ["chart"]["font_size_axis"]
     fs_title = _VIZ["chart"]["font_size_title"]
-    ax.set_title(f"{_VIZ["titles"]["cluster_distribution_by_group"]} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
+    ax.set_title(f"{_VIZ['titles']['cluster_distribution_by_group']} ({', '.join(categories)})", fontsize=fs_title, fontweight='bold', pad=20, fontfamily=_VIZ["chart"]["font_family"])
     ax.set_xlabel('Group', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
     ax.set_ylabel('Clusters', fontsize=fs_axis, fontweight='bold', fontfamily=_VIZ["chart"]["font_family"])
     plt.tight_layout()
@@ -677,7 +677,7 @@ def create_treemap_html(comparison_df, categories, output_file=None):
     percent_cols = [f'{c}_Percent' for c in categories if f'{c}_Percent' in df.columns]
     if len(categories) == 2 and 'Difference' in df.columns:
         color_col = 'Difference'
-        fig = px.treemap(df, path=[px.Constant("Clusters"), 'Cluster_Label'], values='Total_Count', color=color_col, color_continuous_scale='RdBu', hover_data=['Cluster_ID'] + percent_cols)
+        fig = px.treemap(pd.DataFrame(df), path=[px.Constant("Clusters"), 'Cluster_Label'], values='Total_Count', color=color_col, color_continuous_scale='RdBu', hover_data=['Cluster_ID'] + percent_cols)
     else:
         if percent_cols:
             df['Dominant_Group'] = df[percent_cols].idxmax(axis=1).str.replace('_Percent', '', regex=False)
@@ -685,7 +685,7 @@ def create_treemap_html(comparison_df, categories, output_file=None):
         else:
             df['Dominant_Group'] = 'N/A'
             df['Dominant_Share'] = np.nan
-        fig = px.treemap(df, path=[px.Constant("Clusters"), 'Cluster_Label'], values='Total_Count', color='Dominant_Group', hover_data=['Cluster_ID', 'Dominant_Share'] + percent_cols)
+        fig = px.treemap(pd.DataFrame(df), path=[px.Constant("Clusters"), 'Cluster_Label'], values='Total_Count', color='Dominant_Group', hover_data=['Cluster_ID', 'Dominant_Share'] + percent_cols)
     fig.update_layout(margin=dict(t=40, l=10, r=10, b=10), title="Cluster treemap")
     fig.write_html(output_file, include_plotlyjs='cdn')
     print(f"✓ Saved to {output_file}")
@@ -759,42 +759,49 @@ def fixed_outputs_mode():
     print(f"Groups: {categories}")
     print(f"Group-by column (word clouds): {group_col or 'not found'}")
     generated = []
-    write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2, chi2_p)
-    generated.append(_of["overview_report"])
-    create_cluster_sizes_chart(clusters_df, total_rows, _of["cluster_sizes"])
-    generated.append(_of["cluster_sizes"])
-    create_cluster_proportions_pie(clusters_df, total_rows, _of["cluster_proportions_pie"], top_n=10)
-    generated.append(_of["cluster_proportions_pie"])
-    create_cluster_heatmap(comparison_df, categories, _of["cluster_heatmap"])
-    generated.append(_of["cluster_heatmap"])
-    create_cluster_mix_stacked_bar(comparison_df, categories, _of["cluster_mix_stacked_bar"], top_clusters=10)
-    generated.append(_of["cluster_mix_stacked_bar"])
+
+    def _run(name, fn, *out_names):
+        try:
+            fn()
+            for n in out_names:
+                if n is not None:
+                    generated.append(n)
+        except Exception as e:
+            print(f"  [SKIP] {name}: {e}")
+
+    _run("overview report", lambda: write_overview_report(clusters_df, total_rows, group_col, categories, group_totals, chi2, chi2_p), _of["overview_report"])
+    _run("cluster sizes chart", lambda: create_cluster_sizes_chart(clusters_df, total_rows, _of["cluster_sizes"]), _of["cluster_sizes"])
+    _run("cluster proportions pie", lambda: create_cluster_proportions_pie(clusters_df, total_rows, _of["cluster_proportions_pie"], top_n=10), _of["cluster_proportions_pie"])
+    _run("cluster heatmap", lambda: create_cluster_heatmap(comparison_df, categories, _of["cluster_heatmap"]), _of["cluster_heatmap"])
+    _run("cluster mix stacked bar", lambda: create_cluster_mix_stacked_bar(comparison_df, categories, _of["cluster_mix_stacked_bar"], top_clusters=10), _of["cluster_mix_stacked_bar"])
     if group_col and group_col in metadata.columns:
         for cat in categories:
             safe = re.sub(r'[^\w\-]', '_', str(cat))
             out = f'{_of["wordcloud_prefix"]}{safe}.png'
-            create_wordcloud(metadata, group_col, cat, out)
-            generated.append(out)
+            _run(f"wordcloud {cat}", lambda o=out, c=cat: create_wordcloud(metadata, group_col, c, o), out)
     else:
         print("  Skipping word clouds (no group column in metadata)")
-    create_cluster_facets(comparison_df, categories, _of["cluster_facets"], max_groups=5, top_clusters_per_group=12)
-    generated.append(_of["cluster_facets"])
-    if create_treemap_html(comparison_df, categories):
-        generated.append(_of["cluster_treemap"])
-    if create_sankey_html(comparison_df, categories, top_clusters=20):
-        generated.append(_of["cluster_sankey"])
-    create_cluster_comparison_chart(comparison_df, categories, _of["cluster_comparison_chart"])
-    if len(categories) in (2, 3):
-        generated.append(_of["cluster_comparison_chart"])
-    create_difference_chart(comparison_df, categories, _of["cluster_differences_chart"])
-    if 'Difference' in comparison_df.columns and 'P_Value' in comparison_df.columns:
-        generated.append(_of["cluster_differences_chart"])
+    _run("cluster facets", lambda: create_cluster_facets(comparison_df, categories, _of["cluster_facets"], max_groups=5, top_clusters_per_group=12), _of["cluster_facets"])
+    try:
+        if create_treemap_html(comparison_df, categories):
+            generated.append(_of["cluster_treemap"])
+    except Exception as e:
+        print(f"  [SKIP] treemap: {e}")
+    try:
+        if create_sankey_html(comparison_df, categories, top_clusters=20):
+            generated.append(_of["cluster_sankey"])
+    except Exception as e:
+        print(f"  [SKIP] sankey: {e}")
+    _run("cluster comparison chart", lambda: create_cluster_comparison_chart(comparison_df, categories, _of["cluster_comparison_chart"]), _of["cluster_comparison_chart"] if len(categories) in (2, 3) else None)
+    _run("difference chart", lambda: create_difference_chart(comparison_df, categories, _of["cluster_differences_chart"]), _of["cluster_differences_chart"] if ('Difference' in comparison_df.columns and 'P_Value' in comparison_df.columns) else None)
+
     print("\n" + "=" * 60)
     print("Step 3 Complete!")
     print("=" * 60)
     print("\nGenerated files:")
     for f in generated:
-        print(f"  - {f}")
+        if f:
+            print(f"  - {f}")
     print("=" * 60)
 
 
