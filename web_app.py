@@ -4,6 +4,7 @@ Streamlit web app for the embedding pipeline: upload CSV, run embedding → clus
 edit config, and view results. Modern UI with Noto Sans and gradient accents.
 """
 
+import io
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 # Load .env from repo root so subprocesses inherit GOOGLE_API_KEY (they run with cwd=workspace)
@@ -37,6 +39,51 @@ EMB_NPY = "embeddings.npy"
 EMB_META = "embeddings_metadata.csv"
 CLUSTERS_CSV = "clusters_with_labels.csv"
 META_CLUSTERS_CSV = "metadata_with_clusters.csv"
+
+# Files produced by each step (for "Download all Step X" zip)
+STEP_1_FILES = [INPUT_CSV, EMB_NPY, EMB_META]
+STEP_2_FILES = [CLUSTERS_CSV, META_CLUSTERS_CSV]
+
+
+def _step_3_filenames():
+    """Step 3 output filenames from config + wordcloud_*.png pattern."""
+    names = []
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            of = cfg.get("visualization", {}).get("output_files", {})
+            for k, v in of.items():
+                if k == "wordcloud_prefix":
+                    continue
+                if isinstance(v, str):
+                    names.append(v)
+        except Exception:
+            pass
+    return names
+
+
+def _files_for_step(step: int, all_names: set) -> list:
+    """Return sorted list of filenames that belong to this step and exist in workspace."""
+    if step == 1:
+        candidates = STEP_1_FILES
+    elif step == 2:
+        candidates = STEP_2_FILES
+    else:
+        candidates = list(_step_3_filenames())
+        candidates += [n for n in all_names if n.startswith("wordcloud_") and n.endswith(".png")]
+    return sorted(n for n in candidates if n in all_names)
+
+
+def _make_zip_bytes(paths: list) -> bytes:
+    """Build a zip file in memory containing the given files."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in paths:
+            if p.is_file():
+                zf.write(p, p.name)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def inject_css():
@@ -123,8 +170,8 @@ def inject_css():
     /* Embedding CSV upload: button-style, hide default text and Browse, show limit on info icon */
     .csv-upload-info { color: #9ca3af; cursor: help; font-size: 1rem; display: inline-block; vertical-align: middle; }
     main [data-testid="stHorizontalBlock"]:first-of-type [data-testid="column"]:first-of-type [data-testid="stFileUploader"]:first-of-type section {
-        min-height: 2.5rem !important;
-        padding: 0.5rem 1rem !important;
+        min-height: 2rem !important;
+        padding: 0.35rem 0.75rem !important;
         border-radius: 8px !important;
         border: 1px solid #e5e7eb !important;
         background: #ffffff !important;
@@ -140,6 +187,11 @@ def inject_css():
         font-weight: 500;
         color: #374151;
     }
+    /* Hide header Deploy button and main menu (Wide mode) */
+    .stAppDeployButton { visibility: hidden !important; }
+    #MainMenu { visibility: hidden !important; }
+    /* Prevent sidebar from being collapsed by user */
+    [data-testid="collapsedControl"] { display: none !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -260,13 +312,13 @@ config = load_config()
 with st.sidebar:
     st.subheader("Settings")
 
-    with st.expander("Embedding", expanded=True):
+    with st.expander("Embedding", expanded=False):
         embed_test = st.number_input("Test rows (0 = all)", min_value=0, value=0, key="et")
         embed_skip = st.number_input("Skip first N rows", min_value=0, value=0, key="embed_skip")
         embed_workers = st.number_input("Workers", min_value=1, max_value=12, value=6, key="ew")
         embed_sequential = st.checkbox("Sequential (no parallel)", value=False, key="embed_sequential")
 
-    with st.expander("Clustering", expanded=True):
+    with st.expander("Clustering", expanded=False):
         algorithm = st.selectbox("Algorithm", ["hdbscan", "kmeans", "agglomerative"], key="algo")
         k_val = st.number_input("K (kmeans/agglomerative)", min_value=2, value=10, key="k_val")
         min_cluster_size = st.number_input("Min cluster size", min_value=1, value=5, key="min_cluster_size")
@@ -334,191 +386,206 @@ with st.sidebar:
         save_config(config)
         st.success("Config saved.")
 
-# --- Main: 3 action blocks (each with its uploader) ---
+# --- Main: 3 sections, each with inputs left + download right, separators between ---
 text_column_override = None
-
-# ---- Step 1: Embedding (CSV upload mandatory in this block) ----
-st.markdown("**► Embedding**")
-can_embed = (WORKSPACE / INPUT_CSV).exists()
-upload_col, icon_col = st.columns([6, 1])
-with upload_col:
-    uploaded = st.file_uploader("", type=["csv"], key="csv_upload", label_visibility="collapsed")
-with icon_col:
-    st.markdown(
-        '<span class="csv-upload-info" title="Limit 200MB per file • CSV">ⓘ</span>',
-        unsafe_allow_html=True,
-    )
-if uploaded is not None:
-    df_preview = pd.read_csv(uploaded, nrows=5)
-    st.dataframe(df_preview, use_container_width=True)
-    all_cols = list(df_preview.columns)
-    string_cols = get_string_columns(pd.read_csv(uploaded, nrows=500))
-    if not string_cols:
-        string_cols = all_cols
-    if len(string_cols) > 1:
-        text_column_override = st.selectbox("Text column", options=string_cols, key="text_col_select")
-    else:
-        text_column_override = string_cols[0] if string_cols else all_cols[0]
-    path = WORKSPACE / INPUT_CSV
-    with open(path, "wb") as f:
-        f.write(uploaded.getvalue())
-    can_embed = True
-    st.caption(f"Saved as `{INPUT_CSV}`.")
-elif can_embed:
-    try:
-        df_ws = pd.read_csv(WORKSPACE / INPUT_CSV, nrows=500)
-        string_cols = get_string_columns(df_ws)
-        if not string_cols:
-            string_cols = list(df_ws.columns)
-        if len(string_cols) >= 1:
-            text_column_override = st.selectbox("Text column (existing file)", options=string_cols, key="text_col_ws")
-    except Exception:
-        pass
-if not can_embed:
-    st.caption("Upload a CSV to run Embedding.")
-if st.button("Run Embedding", disabled=not can_embed, key="btn_embed"):
-    args = ["--input", str(WORKSPACE / INPUT_CSV)]
-    if text_column_override:
-        args += ["--text-column", text_column_override]
-    args += ["--workers", str(st.session_state.get("ew", 6))]
-    if st.session_state.get("et", 0) > 0:
-        args += ["--test", str(st.session_state.et)]
-    if st.session_state.get("embed_skip", 0) > 0:
-        args += ["--skip", str(st.session_state.embed_skip)]
-    if st.session_state.get("embed_sequential", False):
-        args.append("--sequential")
-    code, out, err = run_embedding_with_progress(SCRIPT_01, args, WORKSPACE)
-    st.session_state.last_stdout["embed"] = out
-    st.session_state.last_stderr["embed"] = err
-    if code == 0:
-        st.success("Done.")
-    else:
-        st.error("Failed.")
-    with st.expander("Log"):
-        st.text(out[-3000:] if len(out) > 3000 else out)
-        if err:
-            st.text(err[-2000:] if len(err) > 2000 else err)
-
-# ---- Step 2: Clustering (optional: use your own embedding outputs) ----
-st.markdown("**► Clustering**")
-with st.expander("Use your own embedding (optional)", expanded=False):
-    emb_npy = st.file_uploader("embeddings.npy", type=["npy"], key="up_emb_npy")
-    emb_meta = st.file_uploader("embeddings_metadata.csv", type=["csv"], key="up_emb_meta")
-    if emb_npy and emb_meta:
-        with open(WORKSPACE / EMB_NPY, "wb") as f:
-            f.write(emb_npy.getvalue())
-        emb_meta_df = pd.read_csv(emb_meta)
-        emb_meta_df.to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
-        st.caption("Saved. You can run Clustering.")
-can_cluster = workspace_has(EMB_NPY, EMB_META)
-if not can_cluster:
-    st.caption("Run Embedding or upload embeddings above.")
-if st.button("Run Clustering", disabled=not can_cluster, key="btn_cluster"):
-    args = ["--algorithm", st.session_state.get("algo", "hdbscan")]
-    if not st.session_state.get("use_llm", True):
-        args.append("--no-llm")
-    if st.session_state.get("assign_noise", False):
-        args.append("--assign-noise")
-    if not st.session_state.get("use_sentiment", True):
-        args.append("--no-sentiment")
-    if st.session_state.get("algo", "hdbscan") in ("kmeans", "agglomerative"):
-        args += ["--k", str(st.session_state.get("k_val", 10))]
-    args += ["--min-cluster-size", str(st.session_state.get("min_cluster_size", 5))]
-    args += ["--dimensions", str(st.session_state.get("dimensions", 250))]
-    if st.session_state.get("no_dim_reduction", False):
-        args.append("--no-dim-reduction")
-    with st.spinner("Running..."):
-        code, out, err = run_script(SCRIPT_02, args, WORKSPACE)
-    st.session_state.last_stdout["cluster"] = out
-    st.session_state.last_stderr["cluster"] = err
-    if code == 0:
-        st.success("Done.")
-    else:
-        st.error("Failed.")
-    with st.expander("Log"):
-        st.text(out[-3000:] if len(out) > 3000 else out)
-        if err:
-            st.text(err[-2000:] if len(err) > 2000 else err)
-
-# ---- Step 3: Visualization (optional: use your own clustering outputs) ----
-st.markdown("**► Visualization**")
-with st.expander("Use your own clusters (optional)", expanded=False):
-    up_clusters = st.file_uploader("clusters_with_labels.csv", type=["csv"], key="up_clusters")
-    up_meta_cl = st.file_uploader("metadata_with_clusters.csv", type=["csv"], key="up_meta_cl")
-    if up_clusters and up_meta_cl:
-        pd.read_csv(up_clusters).to_csv(WORKSPACE / CLUSTERS_CSV, index=False, encoding="utf-8-sig")
-        pd.read_csv(up_meta_cl).to_csv(WORKSPACE / META_CLUSTERS_CSV, index=False, encoding="utf-8-sig")
-        st.caption("Saved. You can run Visualization.")
-    up_emb_meta_viz = st.file_uploader("embeddings_metadata.csv (for word clouds)", type=["csv"], key="up_emb_meta_viz")
-    if up_emb_meta_viz:
-        pd.read_csv(up_emb_meta_viz).to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
-can_viz = workspace_has(CLUSTERS_CSV, META_CLUSTERS_CSV)
-if not can_viz:
-    st.caption("Run Clustering or upload cluster outputs above.")
-meta_path = WORKSPACE / META_CLUSTERS_CSV
-group_by_col = None
-if meta_path.exists():
-    try:
-        mdf = pd.read_csv(meta_path, nrows=1000)
-        exclude = {"text", "Message", "Cluster", "Cluster_ID", "Cluster_Label"}
-        cat_candidates = [c for c in mdf.columns if c not in exclude and mdf[c].nunique() <= 50]
-        if cat_candidates:
-            group_by_col = st.selectbox("Group by column", ["Auto"] + cat_candidates, key="group_by")
-    except Exception:
-        pass
-groups_text = st.text_input("Groups (optional, space-separated)", placeholder="e.g. Website Mobile", key="groups")
-use_llm_viz = st.checkbox("Interactive LLM mode", value=False, key="use_llm_viz")
-if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
-    args = []
-    if group_by_col and group_by_col != "Auto":
-        args += ["--group-by", group_by_col]
-    if groups_text.strip():
-        args += ["--groups"] + groups_text.strip().split()
-    if use_llm_viz:
-        args.append("--llm")
-    if st.session_state.get("compare_only", False):
-        args.append("--compare-only")
-    if st.session_state.get("confirm", False):
-        args.append("--confirm")
-    with st.spinner("Running..."):
-        code, out, err = run_script(SCRIPT_03, args, WORKSPACE)
-    st.session_state.last_stdout["viz"] = out
-    st.session_state.last_stderr["viz"] = err
-    if code == 0:
-        st.success("Done.")
-    else:
-        st.error("Failed.")
-    with st.expander("Log"):
-        st.text(out[-3000:] if len(out) > 3000 else out)
-        if err:
-            st.text(err[-2000:] if len(err) > 2000 else err)
-
-# --- Results ---
-st.subheader("📂 Outputs")
 out_files = list(WORKSPACE.iterdir()) if WORKSPACE.exists() else []
 out_files = [f for f in out_files if f.is_file()]
+all_names = {f.name for f in out_files}
+step_labels = {1: "Embedding", 2: "Clustering", 3: "Visualization"}
 
-for f in sorted(out_files, key=lambda x: x.name):
-    name = f.name
-    if name.endswith(".csv"):
+
+def _render_step_download(step: int):
+    """Right column: one zip download + file names list for this step."""
+    step_files = _files_for_step(step, all_names)
+    label = step_labels[step]
+    st.markdown(f"**Download {label} outputs**")
+    if not step_files:
+        st.caption(f"Run {label} to generate outputs.")
+        return
+    paths = [WORKSPACE / n for n in step_files]
+    zip_bytes = _make_zip_bytes(paths)
+    st.download_button(
+        f"📥 Download all ({len(paths)} file{'s' if len(paths) != 1 else ''})",
+        data=zip_bytes,
+        file_name=f"step_{step}_outputs.zip",
+        mime="application/zip",
+        key=f"dl_step_{step}_zip",
+    )
+    for n in sorted(step_files):
+        st.caption(f"  • {n}")
+
+
+# ---- Section 1: Embedding ----
+col_emb_left, col_emb_right = st.columns([1, 1])
+with col_emb_left:
+    st.markdown("**► Embedding**")
+    can_embed = (WORKSPACE / INPUT_CSV).exists()
+    upload_col, icon_col = st.columns([6, 1])
+    with upload_col:
+        uploaded = st.file_uploader("", type=["csv"], key="csv_upload", label_visibility="collapsed")
+    with icon_col:
+        st.markdown(
+            '<span class="csv-upload-info" title="Limit 200MB per file • CSV">ⓘ</span>',
+            unsafe_allow_html=True,
+        )
+    if uploaded is not None:
+        df_preview = pd.read_csv(uploaded, nrows=5)
+        all_cols = list(df_preview.columns)
+        uploaded.seek(0)
+        string_cols = get_string_columns(pd.read_csv(uploaded, nrows=500))
+        if not string_cols:
+            string_cols = all_cols
+        path = WORKSPACE / INPUT_CSV
+        with open(path, "wb") as f:
+            f.write(uploaded.getvalue())
+        can_embed = True
+        with st.expander("Preview & text column", expanded=False):
+            st.dataframe(pd.DataFrame(df_preview), use_container_width=True)
+            if len(string_cols) > 1:
+                text_column_override = st.selectbox("Text column", options=string_cols, key="text_col_select")
+            else:
+                text_column_override = string_cols[0] if string_cols else all_cols[0]
+        st.caption(f"Saved as `{INPUT_CSV}`.")
+    elif can_embed:
         try:
-            df = pd.read_csv(f, nrows=100)
-            st.markdown(f"**{name}**")
-            st.dataframe(df, width="stretch")
-            with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="text/csv", key=f"dl_{name}")
+            df_ws = pd.read_csv(WORKSPACE / INPUT_CSV, nrows=500)
+            string_cols = get_string_columns(df_ws)
+            if not string_cols:
+                string_cols = list(df_ws.columns)
+            with st.expander("Preview & text column", expanded=False):
+                if len(string_cols) >= 1:
+                    text_column_override = st.selectbox("Text column (existing file)", options=string_cols, key="text_col_ws")
         except Exception:
-            with open(f, "rb") as fp:
-                st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_{name}")
-    elif name.endswith(".png"):
-        st.markdown(f"**{name}**")
-        st.image(str(f), width="stretch")
-        with open(f, "rb") as fp:
-            st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="image/png", key=f"dl_{name}")
-    elif name.endswith(".html"):
-        st.markdown(f"**{name}**")
-        with open(f, "rb") as fp:
-            st.download_button(f"Download {name}", data=fp.read(), file_name=name, mime="text/html", key=f"dl_{name}")
-    elif name.endswith((".txt", ".npy")):
-        with open(f, "rb") as fp:
-            st.download_button(f"Download {name}", data=fp.read(), file_name=name, key=f"dl_{name}")
+            pass
+    if not can_embed:
+        st.caption("Upload a CSV to run Embedding.")
+    if st.button("Run Embedding", disabled=not can_embed, key="btn_embed"):
+        args = ["--input", str(WORKSPACE / INPUT_CSV)]
+        if text_column_override:
+            args += ["--text-column", text_column_override]
+        args += ["--workers", str(st.session_state.get("ew", 6))]
+        if st.session_state.get("et", 0) > 0:
+            args += ["--test", str(st.session_state.et)]
+        if st.session_state.get("embed_skip", 0) > 0:
+            args += ["--skip", str(st.session_state.embed_skip)]
+        if st.session_state.get("embed_sequential", False):
+            args.append("--sequential")
+        code, out, err = run_embedding_with_progress(SCRIPT_01, args, WORKSPACE)
+        st.session_state.last_stdout["embed"] = out
+        st.session_state.last_stderr["embed"] = err
+        if code == 0:
+            st.success("Done.")
+        else:
+            st.error("Failed.")
+        with st.expander("Log"):
+            st.text(out[-3000:] if len(out) > 3000 else out)
+            if err:
+                st.text(err[-2000:] if len(err) > 2000 else err)
+with col_emb_right:
+    _render_step_download(1)
+
+st.divider()
+
+# ---- Section 2: Clustering ----
+col_cl_left, col_cl_right = st.columns([1, 1])
+with col_cl_left:
+    st.markdown("**► Clustering**")
+    with st.expander("Use your own embedding (optional)", expanded=False):
+        emb_npy = st.file_uploader("embeddings.npy", type=["npy"], key="up_emb_npy")
+        emb_meta = st.file_uploader("embeddings_metadata.csv", type=["csv"], key="up_emb_meta")
+        if emb_npy and emb_meta:
+            with open(WORKSPACE / EMB_NPY, "wb") as f:
+                f.write(emb_npy.getvalue())
+            emb_meta_df = pd.read_csv(emb_meta)
+            emb_meta_df.to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
+            st.caption("Saved. You can run Clustering.")
+    can_cluster = workspace_has(EMB_NPY, EMB_META)
+    if not can_cluster:
+        st.caption("Run Embedding or upload embeddings above.")
+    if st.button("Run Clustering", disabled=not can_cluster, key="btn_cluster"):
+        args = ["--algorithm", st.session_state.get("algo", "hdbscan")]
+        if not st.session_state.get("use_llm", True):
+            args.append("--no-llm")
+        if st.session_state.get("assign_noise", False):
+            args.append("--assign-noise")
+        if not st.session_state.get("use_sentiment", True):
+            args.append("--no-sentiment")
+        if st.session_state.get("algo", "hdbscan") in ("kmeans", "agglomerative"):
+            args += ["--k", str(st.session_state.get("k_val", 10))]
+        args += ["--min-cluster-size", str(st.session_state.get("min_cluster_size", 5))]
+        args += ["--dimensions", str(st.session_state.get("dimensions", 250))]
+        if st.session_state.get("no_dim_reduction", False):
+            args.append("--no-dim-reduction")
+        with st.spinner("Running..."):
+            code, out, err = run_script(SCRIPT_02, args, WORKSPACE)
+        st.session_state.last_stdout["cluster"] = out
+        st.session_state.last_stderr["cluster"] = err
+        if code == 0:
+            st.success("Done.")
+        else:
+            st.error("Failed.")
+        with st.expander("Log"):
+            st.text(out[-3000:] if len(out) > 3000 else out)
+            if err:
+                st.text(err[-2000:] if len(err) > 2000 else err)
+with col_cl_right:
+    _render_step_download(2)
+
+st.divider()
+
+# ---- Section 3: Visualization ----
+col_viz_left, col_viz_right = st.columns([1, 1])
+with col_viz_left:
+    st.markdown("**► Visualization**")
+    with st.expander("Use your own clusters (optional)", expanded=False):
+        up_clusters = st.file_uploader("clusters_with_labels.csv", type=["csv"], key="up_clusters")
+        up_meta_cl = st.file_uploader("metadata_with_clusters.csv", type=["csv"], key="up_meta_cl")
+        if up_clusters and up_meta_cl:
+            pd.read_csv(up_clusters).to_csv(WORKSPACE / CLUSTERS_CSV, index=False, encoding="utf-8-sig")
+            pd.read_csv(up_meta_cl).to_csv(WORKSPACE / META_CLUSTERS_CSV, index=False, encoding="utf-8-sig")
+            st.caption("Saved. You can run Visualization.")
+        up_emb_meta_viz = st.file_uploader("embeddings_metadata.csv (for word clouds)", type=["csv"], key="up_emb_meta_viz")
+        if up_emb_meta_viz:
+            pd.read_csv(up_emb_meta_viz).to_csv(WORKSPACE / EMB_META, index=False, encoding="utf-8-sig")
+    can_viz = workspace_has(CLUSTERS_CSV, META_CLUSTERS_CSV)
+    if not can_viz:
+        st.caption("Run Clustering or upload cluster outputs above.")
+    meta_path = WORKSPACE / META_CLUSTERS_CSV
+    group_by_col = None
+    if meta_path.exists():
+        try:
+            mdf = pd.read_csv(meta_path, nrows=1000)
+            exclude = {"text", "Message", "Cluster", "Cluster_ID", "Cluster_Label"}
+            cat_candidates = [c for c in mdf.columns if c not in exclude and mdf[c].nunique() <= 50]
+            if cat_candidates:
+                group_by_col = st.selectbox("Group by column", ["Auto"] + cat_candidates, key="group_by")
+        except Exception:
+            pass
+    groups_text = st.text_input("Groups (optional, space-separated)", placeholder="e.g. Website Mobile", key="groups")
+    use_llm_viz = st.checkbox("Interactive LLM mode", value=False, key="use_llm_viz")
+    if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
+        args = []
+        if group_by_col and group_by_col != "Auto":
+            args += ["--group-by", group_by_col]
+        if groups_text.strip():
+            args += ["--groups"] + groups_text.strip().split()
+        if use_llm_viz:
+            args.append("--llm")
+        if st.session_state.get("compare_only", False):
+            args.append("--compare-only")
+        if st.session_state.get("confirm", False):
+            args.append("--confirm")
+        with st.spinner("Running..."):
+            code, out, err = run_script(SCRIPT_03, args, WORKSPACE)
+        st.session_state.last_stdout["viz"] = out
+        st.session_state.last_stderr["viz"] = err
+        if code == 0:
+            st.success("Done.")
+        else:
+            st.error("Failed.")
+        with st.expander("Log"):
+            st.text(out[-3000:] if len(out) > 3000 else out)
+            if err:
+                st.text(err[-2000:] if len(err) > 2000 else err)
+with col_viz_right:
+    _render_step_download(3)
