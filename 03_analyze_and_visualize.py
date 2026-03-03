@@ -8,7 +8,6 @@ or --llm for interactive ad-hoc numbers/visualizations.
 
 import os
 
-# Ensure matplotlib/fontconfig cache dirs are writable (important in restricted environments).
 _RUNTIME_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".runtime_cache")
 os.makedirs(_RUNTIME_CACHE_DIR, exist_ok=True)
 os.environ.setdefault("XDG_CACHE_HOME", _RUNTIME_CACHE_DIR)
@@ -37,14 +36,13 @@ from wordcloud import WordCloud
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
-# Input file names (fixed)
 METADATA_CSV = 'embeddings_metadata.csv'
 METADATA_WITH_CLUSTERS_CSV = 'metadata_with_clusters.csv'
 CLUSTERS_CSV = 'clusters_with_labels.csv'
 
 
 def _load_visualization_config():
-    """Load visualization from config/config.json. Single source of truth; no fallbacks."""
+    """Load visualization config from config/config.json."""
     config_path = Path(__file__).resolve().parent / "config" / "config.json"
     with open(config_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -59,16 +57,13 @@ def _load_visualization_config():
 
 _VIZ = _load_visualization_config()
 _of = _VIZ["output_files"]
-# Avoid matplotlib/pyparsing ParseException on hyphen in generic name (use equivalent)
 if _VIZ.get("chart") and _VIZ["chart"].get("font_family") == "sans-serif":
     _VIZ["chart"] = {**_VIZ["chart"], "font_family": "DejaVu Sans"}
-
-# Column name for text content in metadata (must match step 01 output)
 TEXT_COLUMN = 'text'
 
 
 def _text_column(metadata_df):
-    """Return the text column name (prefer TEXT_COLUMN, fallback to 'Message' for old outputs)."""
+    """Text column name: TEXT_COLUMN or 'Message'."""
     if metadata_df is None or metadata_df.columns is None:
         return TEXT_COLUMN
     if TEXT_COLUMN in metadata_df.columns:
@@ -78,16 +73,12 @@ def _text_column(metadata_df):
     return TEXT_COLUMN
 
 
-# Columns to exclude from category detection (include both names for backward compatibility)
 EXCLUDE_FROM_CATEGORY = {TEXT_COLUMN, 'Message', 'Cluster', 'Cluster_ID', 'Cluster_Label'}
 MAX_CARDINALITY_FOR_CATEGORY = 50
 
 
 def detect_category_columns(metadata_with_clusters):
-    """
-    Find columns that look like categories: string-like with limited unique values.
-    Returns list of column names.
-    """
+    """Column names that look like categories (limited cardinality)."""
     candidates = []
     for col in metadata_with_clusters.columns:
         if col in EXCLUDE_FROM_CATEGORY:
@@ -105,7 +96,7 @@ def detect_category_columns(metadata_with_clusters):
 
 
 def _normalize_clusters_df(clusters_df):
-    """Ensure clusters DataFrame has Cluster_ID and Cluster_Label (rename from Topic_* if present)."""
+    """Ensure Cluster_ID and Cluster_Label (rename Topic_* if present)."""
     if clusters_df is None or len(clusters_df) == 0:
         return clusters_df
     if 'Cluster_Label' not in clusters_df.columns and 'Topic_Label' in clusters_df.columns:
@@ -116,7 +107,6 @@ def _normalize_clusters_df(clusters_df):
 
 
 def load_data(clusters_file, metadata_file):
-    """Load clustering results and metadata."""
     print("Loading data...")
     clusters_df = pd.read_csv(clusters_file)
     clusters_df = _normalize_clusters_df(clusters_df)
@@ -127,7 +117,6 @@ def load_data(clusters_file, metadata_file):
 
 
 def calculate_proportions(metadata_with_clusters, clusters_df, group_col, categories):
-    """Calculate cluster proportions for each group."""
     totals = {cat: len(metadata_with_clusters[metadata_with_clusters[group_col].astype(str) == str(cat)]) for cat in categories}
     total_all = sum(totals.values())
     print(f"\nGroup column: '{group_col}'")
@@ -171,10 +160,7 @@ def calculate_proportions(metadata_with_clusters, clusters_df, group_col, catego
 
 
 def perform_z_test(n1, x1, n2, x2, alpha=0.05):
-    """
-    Z-test for difference in proportions (two groups).
-    Returns: z_score, p_value, (ci_lower, ci_upper) in percentage points.
-    """
+    """Z-test for two proportions. Returns z_score, p_value, (ci_lower, ci_upper) in pct points."""
     if n1 == 0 or n2 == 0:
         return np.nan, np.nan, (np.nan, np.nan)
     p1 = x1 / n1
@@ -193,10 +179,7 @@ def perform_z_test(n1, x1, n2, x2, alpha=0.05):
 
 
 def perform_chi_square_test(metadata_with_clusters, clusters_df, group_col):
-    """Chi-square test: clusters x groups association.
-
-    Returns standardized residuals for interpretation (useful for 3+ groups).
-    """
+    """Chi-square test (clusters × groups); returns standardized residuals for 3+ groups."""
     print("\nPerforming chi-square test for overall association...")
     contingency = pd.crosstab(
         metadata_with_clusters['Cluster'],
@@ -210,7 +193,6 @@ def perform_chi_square_test(metadata_with_clusters, clusters_df, group_col):
         print(f"✓ Result: Groups have significantly different cluster distributions (p < 0.05)")
     else:
         print("✗ Result: No significant difference in cluster distributions (p >= 0.05)")
-    # Standardized residuals: (observed - expected) / sqrt(expected)
     expected_df = pd.DataFrame(expected, index=contingency.index, columns=contingency.columns)
     with np.errstate(divide='ignore', invalid='ignore'):
         residuals_df = (contingency - expected_df) / np.sqrt(expected_df)
@@ -219,7 +201,7 @@ def perform_chi_square_test(metadata_with_clusters, clusters_df, group_col):
 
 
 def add_statistical_tests(comparison_df, totals, categories):
-    """Add z-tests and CIs when there are exactly 2 groups."""
+    """Add z-tests and CIs for 2 groups only."""
     if len(categories) != 2:
         print("\nSkipping z-tests (only run for 2 groups).")
         comparison_df['Z_Score'] = np.nan
@@ -247,7 +229,6 @@ def add_statistical_tests(comparison_df, totals, categories):
 
 
 def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, residuals_df=None):
-    """Generate text report; handles 2 or more groups."""
     report_lines = []
     report_lines.append("="*60)
     report_lines.append(f"CLUSTER COMPARISON BY '{group_col}'")
@@ -287,9 +268,7 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, 
         else:
             report_lines.append("  No significant differences found")
     elif len(categories) >= 3 and residuals_df is not None and isinstance(residuals_df, pd.DataFrame):
-        # Help interpret where differences come from (cells contributing most)
         report_lines.append(f"\n\nCELLS WITH LARGEST STANDARDIZED RESIDUALS (interpretation aid):")
-        # Map cluster id -> label for readability
         id_to_label = dict(zip(comparison_df['Cluster_ID'], comparison_df['Cluster_Label']))
         flat = residuals_df.stack().reset_index()
         flat.columns = ['Cluster_ID', 'Group', 'Std_Residual']
@@ -308,16 +287,14 @@ def generate_report(comparison_df, chi2, chi2_p, totals, categories, group_col, 
     return "\n".join(report_lines)
 
 
-# --- Visualization helpers (from former step 04) ---
-
 def get_categories_from_comparison(comparison_df):
-    """Infer group category names from comparison CSV columns (*_Count)."""
+    """Infer category names from *_Count columns."""
     count_cols = [c for c in comparison_df.columns if c.endswith('_Count')]
     return [c.replace('_Count', '') for c in count_cols]
 
 
 def get_group_col_from_report(report_path=None):
-    """Parse group-by column name from comparison report. Returns None if not found."""
+    """Parse group-by column from comparison report."""
     report_path = report_path or _of["comparison_report"]
     if not os.path.isfile(report_path) or report_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.html')):
         return None
@@ -331,7 +308,6 @@ def get_group_col_from_report(report_path=None):
 
 
 def parse_chi_square_from_report(report_path=None):
-    """Parse chi-square statistic and p-value from comparison report."""
     report_path = report_path or _of["comparison_report"]
     if not os.path.isfile(report_path) or report_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.html')):
         return None, None
@@ -348,7 +324,7 @@ def parse_chi_square_from_report(report_path=None):
 
 
 def _ensure_comparison_numeric(comparison_df):
-    """Coerce *_Count, *_Percent, Difference to numeric (CSV read can leave them as object)."""
+    """Coerce *_Count, *_Percent, Difference to numeric."""
     out = comparison_df.copy()
     for col in out.columns:
         if col.endswith('_Count') or col.endswith('_Percent') or col == 'Difference':
@@ -357,7 +333,7 @@ def _ensure_comparison_numeric(comparison_df):
 
 
 def load_fixed_mode_data():
-    """Load all data files for fixed outputs (comparison CSV and report written earlier in this run)."""
+    """Load comparison CSV, report, metadata, clusters for fixed-output visualizations."""
     print("Loading data for visualizations...")
     comparison_df = pd.read_csv(_of["comparison_csv"])
     comparison_df = _ensure_comparison_numeric(comparison_df)
@@ -387,7 +363,7 @@ def _cluster_totals_from_comparison(comparison_df, categories):
 
 
 def create_cluster_comparison_chart(comparison_df, categories, output_file):
-    """Bar chart comparing clusters across groups (2 or 3 groups only)."""
+    """Bar chart: clusters across groups (2 or 3 groups)."""
     if not categories:
         return
     if len(categories) not in (2, 3):
@@ -425,7 +401,6 @@ def create_cluster_comparison_chart(comparison_df, categories, output_file):
 
 
 def create_wordcloud(metadata, group_col, channel, output_file):
-    """Word cloud for one group."""
     print(f"Creating word cloud for {channel}...")
     col = metadata.get(group_col)
     if col is None:
@@ -806,7 +781,7 @@ def fixed_outputs_mode():
 
 
 def llm_mode_interactive(confirm_before_run=False):
-    """Interactive LLM mode: user prompts for ad-hoc numbers or visualizations."""
+    """Interactive mode: user prompts for ad-hoc numbers or visualizations."""
     dfs = {}
     for name, path in [
         ("comparison_df", _of["comparison_csv"]),
@@ -902,12 +877,6 @@ def llm_mode_interactive(confirm_before_run=False):
 
 
 if __name__ == '__main__':
-    # CLI usage:
-    #   python 03_analyze_and_visualize.py
-    #   python 03_analyze_and_visualize.py --group-by COLUMN
-    #   python 03_analyze_and_visualize.py --group-by COLUMN --groups v1 v2 v3
-    #   python 03_analyze_and_visualize.py --compare-only   # comparison CSV + report only, no charts
-    #   python 03_analyze_and_visualize.py --llm [--confirm]   # interactive LLM mode
     parser = argparse.ArgumentParser(
         description='Compare cluster proportions and create reports/visualizations.'
     )
@@ -932,8 +901,6 @@ if __name__ == '__main__':
     try:
         clusters_df, metadata = load_data(clusters_file, metadata_file)
         metadata_with_clusters = pd.read_csv(metadata_with_clusters_file)
-
-        # Resolve group-by column
         category_columns = detect_category_columns(metadata_with_clusters)
         if args.group_by:
             if args.group_by not in metadata_with_clusters.columns:

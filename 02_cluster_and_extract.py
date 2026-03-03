@@ -30,7 +30,6 @@ except ImportError:
     print("Warning: google-genai not installed. LLM labels will use fallback.")
     genai = None
 
-# Client for Gemini API (set by configure_api when genai is available)
 _genai_client = None
 
 try:
@@ -41,10 +40,9 @@ except ImportError:
     HDBSCAN_AVAILABLE = False
     hdbscan = None
 
-# Load environment variables
 load_dotenv()
 
-# Column name for text content in metadata (must match step 01 output)
+# Must match step 01 output
 TEXT_COLUMN = "text"
 
 
@@ -57,7 +55,6 @@ def _text_column(metadata):
     return None
 
 
-# Global cache for LLM-generated labels
 _llm_label_cache = {}
 
 def configure_api():
@@ -73,17 +70,7 @@ def configure_api():
     return True
 
 def reduce_dimensions(embeddings, n_components=250):
-    """
-    Reduce embeddings using PCA to improve clustering performance.
-    
-    Args:
-        embeddings: numpy array of embeddings (n_samples, n_features)
-        n_components: number of dimensions to reduce to (default 250)
-    
-    Returns:
-        reduced_embeddings: numpy array of reduced embeddings
-        pca: fitted PCA object
-    """
+    """Reduce embeddings using PCA. Returns (reduced_array, fitted_pca)."""
     print(f"\nReducing dimensions from {embeddings.shape[1]}D to {n_components}D using PCA...")
     pca = PCA(n_components=n_components)
     reduced = pca.fit_transform(embeddings)
@@ -93,10 +80,7 @@ def reduce_dimensions(embeddings, n_components=250):
 
 
 def find_optimal_clusters(embeddings, min_k=5, max_k=30, sample_size=None):
-    """
-    Find optimal number of clusters using Elbow Method and Silhouette Score.
-    Used when running kmeans/agglomerative without --k or optimal_k.txt.
-    """
+    """Find optimal k via elbow + silhouette (used when --k and optimal_k.txt absent)."""
     print(f"\nTesting cluster numbers from {min_k} to {max_k}...")
     if sample_size and len(embeddings) > sample_size:
         print(f"Sampling {sample_size:,} embeddings for faster computation...")
@@ -149,7 +133,7 @@ def find_optimal_clusters(embeddings, min_k=5, max_k=30, sample_size=None):
 
 
 def _plot_optimal_k_results(results, output_file):
-    """Create elbow + silhouette visualization for optimal k."""
+    """Plot elbow + silhouette for optimal k."""
     k_range = results['k_range']
     inertias = results['inertias']
     silhouette_scores = results['silhouette_scores']
@@ -176,7 +160,6 @@ def _plot_optimal_k_results(results, output_file):
 
 
 def _save_optimal_k(optimal_k, output_file):
-    """Save optimal k to a text file."""
     with open(output_file, 'w') as f:
         f.write(str(optimal_k))
     print(f"✓ Saved optimal k={optimal_k} to {output_file}")
@@ -184,11 +167,7 @@ def _save_optimal_k(optimal_k, output_file):
 
 def load_data(embeddings_file, metadata_file, optimal_k_file, algorithm, manual_k=None,
               optimal_k_plot='optimal_clusters.png', min_k=5, max_k=30):
-    """
-    Load embeddings and metadata. Resolve k for kmeans/agglomerative:
-    1) manual_k (--k), 2) optimal_k.txt, 3) run find_optimal_clusters and save.
-    For hdbscan, optimal_k is not read or used.
-    """
+    """Load embeddings and metadata; resolve k from --k, optimal_k.txt, or auto-detect."""
     print("Loading data...")
     embeddings = np.load(embeddings_file)
     metadata = pd.read_csv(metadata_file)
@@ -206,8 +185,6 @@ def load_data(embeddings_file, metadata_file, optimal_k_file, algorithm, manual_
             optimal_k = int(f.read().strip())
         print(f"✓ Optimal k from file: {optimal_k}")
         return embeddings, metadata, optimal_k
-
-    # Need k but no file and no --k: run optimal K detection
     print("No --k and no optimal_k.txt; running optimal K detection...")
     sample_size = 10000 if len(embeddings) > 10000 else None
     results = find_optimal_clusters(embeddings, min_k=min_k, max_k=max_k, sample_size=sample_size)
@@ -217,7 +194,6 @@ def load_data(embeddings_file, metadata_file, optimal_k_file, algorithm, manual_
     return embeddings, metadata, results['optimal_k']
 
 
-# Sentiment lexicon: config/config.json under key "sentiment_words" (longer matches first)
 def _load_sentiment_config():
     config_path = Path(__file__).resolve().parent / "config" / "config.json"
     try:
@@ -238,7 +214,7 @@ SENTIMENT_NEGATIVE, SENTIMENT_POSITIVE = _load_sentiment_config()
 
 
 def _get_sentiment(text):
-    """Return -1 (negative), 0 (neutral), or 1 (positive). Check negative first; longer matches first."""
+    """Return -1, 0, or 1. Negative checked first; longer matches first."""
     if not text or not isinstance(text, str):
         return 0
     t = text.strip()
@@ -253,13 +229,12 @@ def _get_sentiment(text):
 
 
 def augment_embeddings_with_sentiment(embeddings, metadata, scale=0.5):
-    """Append a sentiment dimension (-scale, 0, +scale) so clustering can separate by sentiment."""
+    """Append sentiment dimension (-scale, 0, +scale) to embeddings."""
     col = _text_column(metadata)
     if col is None:
         print("  Warning: No text column found for sentiment; skipping.")
         return embeddings
     sentiments = np.array([_get_sentiment(metadata[col].iloc[i]) for i in range(len(metadata))], dtype=np.float64)
-    # Reshape (n,) -> (n, 1), scale so it has visible effect but doesn't dominate
     extra = (sentiments * scale).reshape(-1, 1)
     n_pos = (sentiments == 1).sum()
     n_neg = (sentiments == -1).sum()
@@ -268,13 +243,12 @@ def augment_embeddings_with_sentiment(embeddings, metadata, scale=0.5):
 
 
 def _assign_noise_to_nearest_cluster(embeddings_normalized, cluster_labels):
-    """Assign each point with label -1 to the cluster of its nearest non-noise neighbor."""
+    """Assign label -1 (noise) points to nearest non-noise cluster."""
     noise_idx = np.where(cluster_labels == -1)[0]
     non_noise_idx = np.where(cluster_labels != -1)[0]
     if len(noise_idx) == 0 or len(non_noise_idx) == 0:
         return cluster_labels
     labels = np.asarray(cluster_labels, dtype=np.int64)
-    # Distances from each noise point to each non-noise point
     D = pairwise_distances(embeddings_normalized[noise_idx], embeddings_normalized[non_noise_idx], metric='euclidean')
     nearest = np.argmin(D, axis=1)
     labels[noise_idx] = labels[non_noise_idx[nearest]]
@@ -282,45 +256,24 @@ def _assign_noise_to_nearest_cluster(embeddings_normalized, cluster_labels):
 
 
 def perform_clustering(embeddings, k, algorithm='hdbscan', use_dim_reduction=True, n_components=250, min_cluster_size=None, assign_noise=False):
-    """
-    Perform clustering with specified algorithm.
-    
-    Args:
-        embeddings: numpy array of embeddings
-        k: number of clusters (used for kmeans/agglomerative, ignored for hdbscan)
-        algorithm: 'hdbscan' (recommended), 'agglomerative', or 'kmeans'
-        use_dim_reduction: whether to reduce dimensions before clustering
-        n_components: number of dimensions if reducing (default 250)
-        min_cluster_size: minimum cluster size for HDBSCAN (default: auto)
-        assign_noise: if True, assign HDBSCAN noise (-1) to nearest cluster (default: False)
-    """
+    """Run clustering (hdbscan, agglomerative, or kmeans). k ignored for hdbscan."""
     print(f"\nPerforming {algorithm} clustering...")
-    
-    # Reduce dimensions if requested
     if use_dim_reduction and embeddings.shape[1] > n_components:
         embeddings_reduced, _ = reduce_dimensions(embeddings, n_components)
         embeddings_to_cluster = embeddings_reduced
     else:
         embeddings_to_cluster = embeddings
-    
-    # Normalize embeddings (important for cosine similarity space)
     embeddings_normalized = normalize(embeddings_to_cluster)
     
     if algorithm == 'hdbscan':
         if not HDBSCAN_AVAILABLE:
             raise ImportError("HDBSCAN not available. Install with: pip install hdbscan")
-        
-        # HDBSCAN: density-based clustering, automatically determines number of clusters
         print("  Using HDBSCAN (density-based, auto-detects clusters)...")
-        
-        # Auto-determine min_cluster_size if not provided (stricter = fewer, larger clusters)
         if min_cluster_size is None:
-            # ~0.5% of data, at least 20 (larger = fewer clusters)
             min_cluster_size = max(100, int(len(embeddings) * 0.005))
             print(f"  Auto min_cluster_size: {min_cluster_size}")
         
         min_samp = min(5, max(1, min_cluster_size // 2))
-        # 'eom' = fewer, more stable clusters; more points may be marked as noise (use --assign-noise if needed)
         clustering = hdbscan.HDBSCAN(
             min_cluster_size=min_cluster_size,
             min_samples=min_samp,
@@ -345,18 +298,14 @@ def perform_clustering(embeddings, k, algorithm='hdbscan', use_dim_reduction=Tru
         return cluster_labels, clustering
     
     elif algorithm == 'agglomerative':
-        # Agglomerative clustering with cosine distance (better for embeddings)
         print(f"  Using cosine distance with k={k}...")
-        # Use 'metric' instead of 'affinity' for newer scikit-learn versions
         try:
-            # Try new API first (scikit-learn 1.2+)
             clustering = AgglomerativeClustering(
                 n_clusters=k,
                 metric='cosine',
-                linkage='average'  # Average linkage works well with cosine distance
+                linkage='average'
             )
         except TypeError:
-            # Fallback to old API (older scikit-learn versions)
             clustering = AgglomerativeClustering(
                 n_clusters=k,
                 affinity='cosine',
@@ -367,7 +316,6 @@ def perform_clustering(embeddings, k, algorithm='hdbscan', use_dim_reduction=Tru
         return cluster_labels, clustering
     
     elif algorithm == 'kmeans':
-        # K-means clustering (original method)
         print(f"  Using K-means with k={k}...")
         kmeans = KMeans(
             n_clusters=k,
@@ -383,35 +331,18 @@ def perform_clustering(embeddings, k, algorithm='hdbscan', use_dim_reduction=Tru
         raise ValueError(f"Unknown algorithm: {algorithm}. Use 'hdbscan', 'agglomerative', or 'kmeans'")
 
 def select_representative_messages(messages, n=8):
-    """
-    Select diverse representative messages from a cluster.
-    
-    Args:
-        messages: list of message strings
-        n: number of messages to select
-    
-    Returns:
-        list of selected messages
-    """
+    """Select up to n diverse messages from a cluster (length 20–200 chars preferred)."""
     if len(messages) <= n:
         return messages
     
-    # Filter messages by length (prefer 20-200 chars)
     filtered = [msg for msg in messages if 20 <= len(msg) <= 200]
     if len(filtered) < n:
-        # If not enough filtered, use all messages
         filtered = messages
-    
-    # Select diverse samples: first, middle, last, and random
     selected = []
     indices_used = set()
-    
-    # First message
     if len(filtered) > 0:
         selected.append(filtered[0])
         indices_used.add(0)
-    
-    # Middle messages
     if len(filtered) > 2:
         mid = len(filtered) // 2
         if mid not in indices_used:
@@ -424,8 +355,6 @@ def select_representative_messages(messages, n=8):
         if last_idx not in indices_used:
             selected.append(filtered[last_idx])
             indices_used.add(last_idx)
-    
-    # Fill remaining with random unique messages
     import random
     remaining = [i for i in range(len(filtered)) if i not in indices_used]
     random.shuffle(remaining)
@@ -451,7 +380,6 @@ def generate_cluster_label_llm(messages, cluster_id):
     if len(messages) < 3:
         return f"Cluster {cluster_id+1}", []
     
-    # Check cache (convert to str so mixed types e.g. str/float from DataFrame don't break sort)
     cache_key = hash(tuple(sorted(str(m) for m in messages[:10])))
     if cache_key in _llm_label_cache:
         return _llm_label_cache[cache_key]
@@ -465,8 +393,7 @@ def generate_cluster_label_llm(messages, cluster_id):
             configure_api()
         if _genai_client is not None:
             try:
-                # Create prompt
-                messages_text = "\n".join([f"- {msg[:200]}" for msg in sample_messages[:8]])  # Limit message length
+                messages_text = "\n".join([f"- {msg[:200]}" for msg in sample_messages[:8]])
                 prompt = f"""Generate a concise cluster label (2-4 words) for these customer service messages. 
 The label should describe the main theme of the cluster.
 
@@ -474,8 +401,6 @@ Messages:
 {messages_text}
 
 Cluster label (2-4 words only):"""
-                
-                # Call Gemini API (try models in order; names vary by API version/region)
                 model_names = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-pro']
                 label = None
                 for model_name in model_names:
@@ -503,11 +428,9 @@ Cluster label (2-4 words only):"""
     return generate_cluster_label_fallback(messages, cluster_id)
 
 def extract_keywords_simple(messages):
-    """Extract keywords from messages using simple frequency counting."""
+    """Top keywords by frequency (stopwords excluded)."""
     import re
     from collections import Counter
-    
-    # Common stopwords
     stopwords = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
                      'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
                      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -523,8 +446,6 @@ def extract_keywords_simple(messages):
         words = re.findall(r'\b[a-zA-Z]{3,}\b', msg.lower())
         words = [w for w in words if w not in stopwords]
         all_words.extend(words)
-    
-    # Count and return top keywords
     word_counts = Counter(all_words)
     top_keywords = [word for word, count in word_counts.most_common(5)]
     return top_keywords
@@ -539,7 +460,7 @@ def generate_cluster_label_fallback(messages, cluster_id):
     return label, keywords
 
 def analyze_clusters(cluster_labels, metadata, use_llm=True):
-    """Analyze clusters and extract cluster labels."""
+    """Build cluster summary and labels (LLM or keyword fallback)."""
     print("\nAnalyzing clusters and extracting labels...")
     metadata["Cluster"] = cluster_labels
     
@@ -549,8 +470,6 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
     # Get unique cluster IDs (excluding noise label -1 if present)
     unique_clusters = sorted([c for c in set(cluster_labels) if c != -1])
     total_clusters = len(unique_clusters)
-    
-    # Handle noise points separately if they exist
     n_noise = (cluster_labels == -1).sum()
     if n_noise > 0:
         print(f"  Note: {n_noise:,} messages marked as noise (outliers) will be excluded from cluster analysis")
@@ -588,8 +507,6 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
         
         if not cluster_messages:
             continue
-        
-        # Generate cluster label
         if use_llm:
             cluster_label, top_keywords = generate_cluster_label_llm(cluster_messages, cluster_id)
         else:
@@ -617,11 +534,8 @@ def analyze_clusters(cluster_labels, metadata, use_llm=True):
             col_safe = col.replace(" ", "_")
             for val in values:
                 safe_val = str(val).replace(" ", "_")
-                # Use __ so 06 can parse column vs value (column__value_Count)
                 row_data[f"{col_safe}__{safe_val}_Count"] = int(value_counts.get(val, 0))
         clusters_data.append(row_data)
-        
-        # Progress update
         progress = (idx + 1) / total_clusters * 100
         elapsed = time.time() - start_time
         rate = (idx + 1) / elapsed if elapsed > 0 else 0
@@ -666,8 +580,6 @@ if __name__ == "__main__":
     optimal_k_file = "optimal_k.txt"
     optimal_k_plot = "optimal_clusters.png"
     output_file = "clusters_with_labels.csv"
-
-    # Load data; for HDBSCAN no k is needed; for kmeans/agglomerative k from --k, file, or auto-detect
     embeddings, metadata, optimal_k = load_data(
         embeddings_file, metadata_file, optimal_k_file,
         algorithm=args.algorithm,
@@ -679,8 +591,6 @@ if __name__ == "__main__":
     if not args.no_sentiment:
         print("\nAdding sentiment dimension (lexicon-based)...")
         embeddings = augment_embeddings_with_sentiment(embeddings, metadata)
-    
-    # Perform clustering
     cluster_labels, clustering_model = perform_clustering(
         embeddings, 
         optimal_k,
@@ -693,10 +603,8 @@ if __name__ == "__main__":
     
     # Analyze clusters and extract labels
     clusters_df, metadata_with_clusters = analyze_clusters(
-        cluster_labels, metadata, use_llm=not args.no_llm
+        cluster_labels, metadata,         use_llm=not args.no_llm
     )
-    
-    # Save results
     save_results(clusters_df, metadata_with_clusters, output_file)
     
     print("\n" + "="*60)

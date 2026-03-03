@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Streamlit web app for the embedding pipeline: upload CSV, run embedding → clustering → visualization,
-edit config, and view results. Modern UI with Noto Sans and gradient accents.
-"""
+"""Streamlit app: upload CSV, run embedding → clustering → visualization; edit config; view results."""
 
 import io
 import json
@@ -15,7 +12,6 @@ import time
 import zipfile
 from pathlib import Path
 
-# Load .env from repo root so subprocesses inherit GOOGLE_API_KEY (they run with cwd=workspace)
 REPO_ROOT = Path(__file__).resolve().parent
 try:
     from dotenv import load_dotenv  # type: ignore[import-untyped]
@@ -40,13 +36,12 @@ EMB_META = "embeddings_metadata.csv"
 CLUSTERS_CSV = "clusters_with_labels.csv"
 META_CLUSTERS_CSV = "metadata_with_clusters.csv"
 
-# Files produced by each step (for "Download all Step X" zip)
 STEP_1_FILES = [INPUT_CSV, EMB_NPY, EMB_META]
 STEP_2_FILES = [CLUSTERS_CSV, META_CLUSTERS_CSV]
 
 
 def _step_3_filenames():
-    """Step 3 output filenames from config + wordcloud_*.png pattern."""
+    """Step 3 output filenames from config plus wordcloud_*.png."""
     names = []
     if CONFIG_PATH.exists():
         try:
@@ -64,7 +59,7 @@ def _step_3_filenames():
 
 
 def _files_for_step(step: int, all_names: set) -> list:
-    """Return sorted list of filenames that belong to this step and exist in workspace."""
+    """Sorted filenames for this step that exist in workspace."""
     if step == 1:
         candidates = STEP_1_FILES
     elif step == 2:
@@ -76,7 +71,7 @@ def _files_for_step(step: int, all_names: set) -> list:
 
 
 def _make_zip_bytes(paths: list) -> bytes:
-    """Build a zip file in memory containing the given files."""
+    """Zip given file paths into bytes."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in paths:
@@ -87,7 +82,7 @@ def _make_zip_bytes(paths: list) -> bytes:
 
 
 def inject_css():
-    """Noto Sans + Liquid Glass: frosted panels, pill header, AI gradient palette."""
+    """Inject Noto Sans, gradient header, frosted panels."""
     st.markdown("""
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -216,7 +211,7 @@ _PROGRESS_RE = re.compile(
 
 
 def _read_stdout_parse_progress(process, latest):
-    """Thread: read process.stdout; parse progress lines and set latest[0] = (pct, rate, eta)."""
+    """Read stdout; parse progress into latest[0] = (pct, rate, eta)."""
     buf = ""
     while True:
         chunk = process.stdout.read(4096)
@@ -238,7 +233,7 @@ def run_embedding_with_progress(script_path, args, cwd):
     process = subprocess.Popen(
         cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1
     )
-    latest = [None]  # latest[0] = (pct, rate, eta) or None
+    latest = [None]
     reader = threading.Thread(target=_read_stdout_parse_progress, args=(process, latest))
     reader.daemon = True
     reader.start()
@@ -274,7 +269,7 @@ def workspace_has(*names):
 
 
 def get_string_columns(df, sample_size=500):
-    """Heuristic: columns that look like text (mostly non-numeric)."""
+    """Columns that look like text (mostly non-numeric)."""
     if df is None or df.empty:
         return []
     cols = []
@@ -300,8 +295,6 @@ st.markdown("""
 <p>Upload CSV, run each step, or use your own outputs. Settings in the sidebar.</p>
 </div>
 """, unsafe_allow_html=True)
-
-# --- Session state ---
 if "last_stdout" not in st.session_state:
     st.session_state.last_stdout = {}
 if "last_stderr" not in st.session_state:
@@ -385,8 +378,6 @@ with st.sidebar:
         config["visualization"]["chart"]["dpi"] = dpi
         save_config(config)
         st.success("Config saved.")
-
-# --- Main: 3 sections, each with inputs left + download right, separators between ---
 text_column_override = None
 out_files = list(WORKSPACE.iterdir()) if WORKSPACE.exists() else []
 out_files = [f for f in out_files if f.is_file()]
@@ -414,8 +405,6 @@ def _render_step_download(step: int):
     for n in sorted(step_files):
         st.caption(f"  • {n}")
 
-
-# ---- Section 1: Embedding ----
 col_emb_left, col_emb_right = st.columns([1, 1])
 with col_emb_left:
     st.markdown("**► Embedding**")
@@ -483,10 +472,7 @@ with col_emb_left:
                 st.text(err[-2000:] if len(err) > 2000 else err)
 with col_emb_right:
     _render_step_download(1)
-
 st.divider()
-
-# ---- Section 2: Clustering ----
 col_cl_left, col_cl_right = st.columns([1, 1])
 with col_cl_left:
     st.markdown("**► Clustering**")
@@ -530,10 +516,7 @@ with col_cl_left:
                 st.text(err[-2000:] if len(err) > 2000 else err)
 with col_cl_right:
     _render_step_download(2)
-
 st.divider()
-
-# ---- Section 3: Visualization ----
 col_viz_left, col_viz_right = st.columns([1, 1])
 with col_viz_left:
     st.markdown("**► Visualization**")
@@ -562,7 +545,7 @@ with col_viz_left:
         except Exception:
             pass
     groups_text = st.text_input("Groups (optional, space-separated)", placeholder="e.g. Website Mobile", key="groups")
-    use_llm_viz = st.checkbox("Interactive LLM mode", value=False, key="use_llm_viz")
+    use_llm_viz = st.checkbox("LLM mode", value=False, key="use_llm_viz")
     if st.button("Run Visualization", disabled=not can_viz, key="btn_viz"):
         args = []
         if group_by_col and group_by_col != "Auto":

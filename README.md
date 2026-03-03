@@ -97,7 +97,7 @@ pip install -r requirements.txt
 streamlit run web_app.py
 ```
 
-终端里会给出一个地址（一般是 **http://localhost:8501**）。用浏览器打开，上传你的 CSV，需要的话选一下「文本列」，然后按顺序点：嵌入 → 聚类 → 可视化。结果和下载都在页面下面，侧边栏里可以改配置（比如情感词、图表样式等）。
+终端里会给出一个地址（一般是 http://localhost:8501）。用浏览器打开，上传你的 CSV，需要的话选一下「文本列」，然后按顺序点：嵌入 → 聚类 → 可视化。结果和下载都在页面下面，侧边栏里可以改配置（比如情感词、图表样式等）。
 
 ### 用命令行
 也可以在终端里分三步跑：
@@ -112,7 +112,7 @@ streamlit run web_app.py
 python 01_generate_embeddings.py --help
 ```
 
-### 遇到问题怎么办
+### 可能出现的问题
 - **出现「GOOGLE_API_KEY not found」** — 在这个文件夹里加一个 `.env` 文件，写上 `GOOGLE_API_KEY=你的 key`。
 - **少装了 package** — 再执行一次 `pip install -r requirements.txt`。
 - **第二步或第三步说找不到文件** — 先按顺序跑完 01、02，生成的文件留着；或者直接用网页版（会用 `streamlit_workspace` 这个文件夹）。

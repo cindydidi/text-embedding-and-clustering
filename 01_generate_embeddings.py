@@ -21,10 +21,9 @@ except ImportError as e:
     print("  python3 -m pip install google-genai numpy pandas python-dotenv")
     sys.exit(1)
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Column name for the embedded text in output metadata (used by steps 02 and 03)
+# Output column name for embedded text (used by steps 02 and 03)
 TEXT_COLUMN = "text"
 
 # Client for Gemini API (set by configure_api)
@@ -40,9 +39,7 @@ def configure_api():
     _genai_client = genai.Client(api_key=api_key)
     print("✓ Google API configured successfully")
 
-# Global cache for embeddings (text -> embedding)
 _embedding_cache = {}
-# Global variable to store detected embedding dimension
 _embedding_dimension = None
 
 def generate_embedding(text, model_name='models/gemini-embedding-001', max_retries=3, use_cache=True):
@@ -57,29 +54,23 @@ def generate_embedding(text, model_name='models/gemini-embedding-001', max_retri
         max_retries: Maximum retry attempts
         use_cache: Whether to use cache (default True)
     """
-    # Check cache first
     if use_cache and text in _embedding_cache:
         return _embedding_cache[text]
-    
-    # Generate new embedding
+
     for attempt in range(max_retries):
         try:
-            # New SDK accepts model name with or without "models/" prefix
             model_arg = model_name.replace("models/", "") if model_name.startswith("models/") else model_name
             result = _genai_client.models.embed_content(
                 model=model_arg,
                 contents=text,
             )
-            # Response has .embeddings (list of one for single content)
             emb = result.embeddings[0]
             embedding = list(emb.embedding) if hasattr(emb.embedding, '__iter__') and not isinstance(emb.embedding, str) else emb.embedding
             
-            # Detect and store embedding dimension from first successful call
             global _embedding_dimension
             if _embedding_dimension is None and embedding is not None:
                 _embedding_dimension = len(embedding)
             
-            # Cache the result
             if use_cache:
                 _embedding_cache[text] = embedding
             
@@ -87,11 +78,10 @@ def generate_embedding(text, model_name='models/gemini-embedding-001', max_retri
         except Exception as e:
             if attempt < max_retries - 1:
                 if 'gemini-embedding-001' in model_name:
-                    # Try text-embedding-004 as fallback
                     model_name = 'models/text-embedding-004'
                     time.sleep(0.5)
                     continue
-                time.sleep(1 * (attempt + 1))  # Short backoff
+                time.sleep(1 * (attempt + 1))
             else:
                 raise Exception(f"Failed to generate embedding after {max_retries} attempts: {e}")
 
@@ -106,7 +96,7 @@ def process_messages_parallel(texts, max_workers=6):
     Returns:
         List of embeddings in same order as texts
     """
-    embeddings = [None] * len(texts)  # Pre-allocate to maintain order
+    embeddings = [None] * len(texts)
     completed_count = 0
     failed_count = 0
     lock = Lock()
@@ -119,12 +109,10 @@ def process_messages_parallel(texts, max_workers=6):
         try:
             embedding = generate_embedding(text, use_cache=True)
             embeddings[index] = embedding
-            # Increment counter with minimal lock time
             with lock:
                 completed_count += 1
             return index, True, None
         except Exception as e:
-            # Get embedding dimension for placeholder (use detected or default)
             global _embedding_dimension
             dim = _embedding_dimension if _embedding_dimension is not None else 3072
             embeddings[index] = [0.0] * dim
@@ -132,21 +120,14 @@ def process_messages_parallel(texts, max_workers=6):
                 completed_count += 1
                 failed_count += 1
             return index, False, str(e)
-    
-    # Process in parallel
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
         future_to_index = {
             executor.submit(process_single, i, t): i 
             for i, t in enumerate(texts)
         }
-        
-        # Process completed tasks and show progress
         for future in as_completed(future_to_index):
             index, success, error = future.result()
-            
-            # Progress update (every 100 completions or every 2 seconds, or at end)
-            # Check outside lock first to minimize contention
             current_time = time.time()
             should_update = False
             current_count = 0
@@ -155,13 +136,10 @@ def process_messages_parallel(texts, max_workers=6):
             with lock:
                 current_count = completed_count
                 current_failed = failed_count
-                # Update less frequently: every 100 or every 2 seconds
                 if (current_count % 100 == 0) or (current_time - last_progress_time >= 2.0) or (current_count == len(texts)):
                     should_update = True
                     if should_update:
                         last_progress_time = current_time
-            
-            # Print outside lock to avoid blocking threads
             if should_update:
                 elapsed = current_time - start_time
                 progress = (current_count / len(texts)) * 100
@@ -171,8 +149,7 @@ def process_messages_parallel(texts, max_workers=6):
                 print(f"\rProgress: {progress:.1f}% ({current_count:,}/{len(texts):,}) | "
                       f"Rate: {rate:.1f} text/s | ETA: {eta/60:.1f} min | "
                       f"Failed: {current_failed}", end='', flush=True)
-    
-    print()  # New line after progress
+    print()
     if failed_count > 0:
         print(f"⚠ Warning: {failed_count} embeddings failed and were replaced with zero vectors")
     
@@ -196,7 +173,6 @@ def process_messages_sequential(texts):
             embedding = generate_embedding(text, use_cache=True)
             embeddings.append(embedding)
             
-            # Progress update every 50 rows
             if (i + 1) % 50 == 0 or (i + 1) == total:
                 elapsed = time.time() - start_time
                 progress = ((i + 1) / total) * 100
@@ -205,19 +181,15 @@ def process_messages_sequential(texts):
                 
                 print(f"\rProgress: {progress:.1f}% ({i+1:,}/{total:,}) | "
                       f"Rate: {rate:.1f} text/s | ETA: {eta/60:.1f} min", end='', flush=True)
-            
-            # Minimal rate limiting
             if (i + 1) % 200 == 0:
                 time.sleep(0.05)
                 
         except Exception as e:
-            # Get embedding dimension for placeholder
             global _embedding_dimension
             dim = _embedding_dimension if _embedding_dimension is not None else 3072
             embeddings.append([0.0] * dim)
             print(f"\nError processing text row {i+1}: {e}")
-    
-    print()  # New line after progress
+    print()
     return embeddings
 
 def _is_string_column(values):
@@ -310,18 +282,14 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
         row_count = 0
         for row in reader:
             text = row.get(text_column, '').strip()
-            if text:  # Only count non-empty text
-                # Skip rows if we haven't reached skip_messages yet
+            if text:
                 if skipped_count < skip_messages:
                     skipped_count += 1
                     continue
-                
-                # Stop if we've reached max_messages
                 if max_messages and len(texts) >= max_messages:
                     break
                 
                 texts.append(text)
-                # Pass through all columns from the input row; store embedded text for downstream scripts
                 metadata.append({**row, TEXT_COLUMN: text})
             
             row_count += 1
@@ -331,8 +299,6 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
     read_time = time.time() - read_start
     total_texts = len(texts)
     print(f"\n✓ Found {total_texts:,} text rows to process (read in {read_time:.1f}s)")
-    
-    # Generate embeddings
     embedding_start_time = time.time()
     
     if use_sequential:
@@ -361,8 +327,6 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
     if len(embeddings) > 0:
         print(f"   Average: {embedding_duration/len(embeddings):.3f} seconds per row")
         print(f"   Rate: {len(embeddings)/embedding_duration:.1f} rows/second")
-    
-    # Convert to numpy array
     save_start_time = time.time()
     embeddings_array = np.array(embeddings)
     print(f"Embedding shape: {embeddings_array.shape}")
@@ -374,13 +338,9 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
         existing_embeddings = np.load(output_embeddings)
         print(f"  Existing: {existing_embeddings.shape[0]:,} embeddings")
         print(f"  New: {embeddings_array.shape[0]:,} embeddings")
-        
-        # Merge embeddings
         merged_embeddings = np.vstack([existing_embeddings, embeddings_array])
         print(f"  Merged: {merged_embeddings.shape[0]:,} total embeddings")
         embeddings_array = merged_embeddings
-        
-        # Also merge metadata if it exists
         if os.path.exists(output_metadata):
             existing_metadata = pd.read_csv(output_metadata)
             print(f"  Merging metadata: {len(existing_metadata):,} + {len(metadata):,} = {len(existing_metadata) + len(metadata):,}")
@@ -389,8 +349,6 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
             metadata_df = pd.DataFrame(metadata)
     else:
         metadata_df = pd.DataFrame(metadata)
-    
-    # Save embeddings
     np.save(output_embeddings, embeddings_array)
     save_end_time = time.time()
     save_duration = save_end_time - save_start_time
@@ -400,8 +358,6 @@ def process_messages(input_file, output_embeddings, output_metadata, max_message
     # Save metadata
     metadata_df.to_csv(output_metadata, index=False, encoding="utf-8-sig")
     print(f"✓ Saved {len(metadata_df):,} metadata rows to {output_metadata}")
-    
-    # Total time summary
     total_time = time.time() - function_start_time
     print(f"\n⏱️  TOTAL TIME: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
     print(f"   - CSV reading: {read_time:.1f}s ({read_time/total_time*100:.1f}%)")
@@ -427,8 +383,6 @@ if __name__ == '__main__':
     parser.add_argument('--text-column', type=str, default=None,
                        help='CSV column name containing the text to embed. Required if CSV has multiple text columns.')
     args = parser.parse_args()
-    
-    # Auto-detect input CSV: use the one in the same folder as this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     csv_files = [f for f in os.listdir(script_dir) if f.endswith('.csv')]
     if args.input is not None:
@@ -459,10 +413,7 @@ if __name__ == '__main__':
     
     output_embeddings = 'embeddings.npy'
     output_metadata = 'embeddings_metadata.csv'
-    
-    # Resolve which CSV column to use for text
     if args.text_column is not None:
-        # Validate that the column exists in the CSV
         with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
             reader = csv.DictReader(f)
             fieldnames = list(reader.fieldnames or [])
@@ -479,10 +430,7 @@ if __name__ == '__main__':
         except ValueError as e:
             print(f"\n{e}")
             exit(1)
-    
-    # Add test suffix to output files if in test mode
     if args.test:
-        # Always use the same test file names so we can merge
         output_embeddings = 'embeddings_test.npy'
         output_metadata = 'embeddings_metadata_test.csv'
     
